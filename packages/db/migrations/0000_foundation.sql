@@ -133,6 +133,29 @@ CREATE TABLE question_knowledge_points (
   CONSTRAINT question_knowledge_points_unique UNIQUE (question_id, knowledge_point_id)
 );
 
+CREATE FUNCTION enforce_published_question_version() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.review_state = 'published' THEN
+    IF NEW.source_id IS NULL THEN
+      RAISE EXCEPTION 'published question versions require a source';
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM question_knowledge_points WHERE question_id = NEW.question_id
+    ) THEN
+      RAISE EXCEPTION 'published question versions require a knowledge-point link';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER question_versions_published_integrity
+AFTER INSERT OR UPDATE OF question_id, source_id, review_state ON question_versions
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION enforce_published_question_version();
+
 CREATE TABLE audit_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   actor_user_id uuid REFERENCES users(id) ON DELETE RESTRICT,

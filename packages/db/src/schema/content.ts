@@ -42,7 +42,10 @@ export const knowledgePointVersions = pgTable("knowledge_point_versions", {
 export const knowledgePrerequisites = pgTable("knowledge_prerequisites", {
   knowledgePointId: uuid("knowledge_point_id").notNull().references(() => knowledgePoints.id, { onDelete: "cascade" }),
   prerequisiteKnowledgePointId: uuid("prerequisite_knowledge_point_id").notNull().references(() => knowledgePoints.id, { onDelete: "restrict" })
-}, (table) => [uniqueIndex("knowledge_prerequisites_unique").on(table.knowledgePointId, table.prerequisiteKnowledgePointId)]);
+}, (table) => [
+  uniqueIndex("knowledge_prerequisites_unique").on(table.knowledgePointId, table.prerequisiteKnowledgePointId),
+  check("knowledge_prerequisites_not_self", sql`${table.knowledgePointId} <> ${table.prerequisiteKnowledgePointId}`)
+]);
 
 export const questions = pgTable("questions", {
   id: uuid("id").defaultRandom().primaryKey(),

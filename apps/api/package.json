@@ -6,7 +6,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
-    "test": "vitest run",
+    "test": "vitest run --exclude dist/**",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

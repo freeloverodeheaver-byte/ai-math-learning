@@ -12,7 +12,12 @@ export async function migrateDb(db: Database): Promise<void> {
 async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is required to run migrations");
-  await migrateDb(createDb(connectionString));
+  const db = createDb(connectionString);
+  try {
+    await migrateDb(db);
+  } finally {
+    await db.$client.end();
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

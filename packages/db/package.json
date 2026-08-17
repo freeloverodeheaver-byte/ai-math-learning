@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-migrations.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "migrate": "tsx src/migrate.ts",
     "test:native-migration": "node dist/test/native-migration-smoke.js",
