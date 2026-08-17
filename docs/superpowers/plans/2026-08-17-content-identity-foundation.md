@@ -176,7 +176,7 @@ export interface SharingDecision {
 {
   "name": "ai-math-learning-product",
   "private": true,
-  "packageManager": "pnpm@10",
+  "packageManager": "pnpm@10.34.5",
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
