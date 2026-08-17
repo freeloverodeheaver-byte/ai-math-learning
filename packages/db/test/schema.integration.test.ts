@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { drizzle } from "drizzle-orm/pglite";
 import { and, eq } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
@@ -355,5 +356,214 @@ describe("foundation schema", () => {
       eq(contentEntityOwners.entityKey, externalKey)
     ));
     expect(survivingOwner).toHaveLength(1);
+  });
+});
+
+interface AccessFixture {
+  classId: string;
+  studentProfileId: string;
+  otherStudentProfileId: string;
+}
+
+async function createAccessFixture(target: PGlite = pglite): Promise<AccessFixture> {
+  const guardianUserId = randomUUID();
+  const studentUserId = randomUUID();
+  const otherStudentUserId = randomUUID();
+  const teacherUserId = randomUUID();
+  const teacherProfileId = randomUUID();
+  const studentProfileId = randomUUID();
+  const otherStudentProfileId = randomUUID();
+  const classId = randomUUID();
+
+  await target.query(
+    `insert into users (id, external_subject) values
+      ($1, $2), ($3, $4), ($5, $6), ($7, $8)`,
+    [
+      guardianUserId, `guardian-${guardianUserId}`,
+      studentUserId, `student-${studentUserId}`,
+      otherStudentUserId, `student-${otherStudentUserId}`,
+      teacherUserId, `teacher-${teacherUserId}`,
+    ],
+  );
+  await target.query(
+    `insert into student_profiles (id, user_id, display_name, grade, semester) values
+      ($1, $2, 'Student', 7, 1), ($3, $4, 'Other student', 8, 2)`,
+    [studentProfileId, studentUserId, otherStudentProfileId, otherStudentUserId],
+  );
+  await target.query(
+    "insert into teacher_profiles (id, user_id, display_name) values ($1, $2, 'Teacher')",
+    [teacherProfileId, teacherUserId],
+  );
+  await target.query(
+    "insert into classes (id, teacher_profile_id, name, subject, invite_code) values ($1, $2, 'Class', 'math', $3)",
+    [classId, teacherProfileId, `invite-${classId}`],
+  );
+
+  return { classId, studentProfileId, otherStudentProfileId };
+}
+
+describe("access migration invariants", () => {
+  it("allows only one requested or active membership for a class and student", async () => {
+    const fixture = await createAccessFixture();
+    await pglite.query(
+      "insert into class_memberships (class_id, student_profile_id, state) values ($1, $2, 'requested')",
+      [fixture.classId, fixture.studentProfileId],
+    );
+
+    await expect(pglite.query(
+      "insert into class_memberships (class_id, student_profile_id, state) values ($1, $2, 'requested')",
+      [fixture.classId, fixture.studentProfileId],
+    )).rejects.toThrow();
+  });
+
+  it("requires resolved_at exactly when a membership is not requested", async () => {
+    const fixture = await createAccessFixture();
+
+    await expect(pglite.query(
+      "insert into class_memberships (class_id, student_profile_id, state, resolved_at) values ($1, $2, 'rejected', null)",
+      [fixture.classId, fixture.studentProfileId],
+    )).rejects.toThrow();
+    await expect(pglite.query(
+      "insert into class_memberships (class_id, student_profile_id, state, resolved_at) values ($1, $2, 'requested', now())",
+      [fixture.classId, fixture.otherStudentProfileId],
+    )).rejects.toThrow();
+  });
+
+  it("rejects an active grant for a non-active membership or a different student", async () => {
+    const fixture = await createAccessFixture();
+    const requestedMembershipId = randomUUID();
+    await pglite.query(
+      "insert into class_memberships (id, class_id, student_profile_id, state) values ($1, $2, $3, 'requested')",
+      [requestedMembershipId, fixture.classId, fixture.studentProfileId],
+    );
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query(
+        "insert into data_sharing_grants (class_membership_id, student_profile_id, scope) values ($1, $2, 'learning_summary')",
+        [requestedMembershipId, fixture.studentProfileId],
+      );
+    })).rejects.toThrow();
+
+    const activeMembershipId = randomUUID();
+    await pglite.query(
+      "insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values ($1, $2, $3, 'active', now())",
+      [activeMembershipId, fixture.classId, fixture.otherStudentProfileId],
+    );
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query(
+        "insert into data_sharing_grants (class_membership_id, student_profile_id, scope) values ($1, $2, 'learning_summary')",
+        [activeMembershipId, fixture.studentProfileId],
+      );
+    })).rejects.toThrow();
+  });
+
+  it("cannot leave an active membership while an unrevoked grant remains", async () => {
+    const fixture = await createAccessFixture();
+    const membershipId = randomUUID();
+    await pglite.transaction(async (tx) => {
+      await tx.query(
+        "insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values ($1, $2, $3, 'active', now())",
+        [membershipId, fixture.classId, fixture.studentProfileId],
+      );
+      await tx.query(
+        "insert into data_sharing_grants (class_membership_id, student_profile_id, scope) values ($1, $2, 'learning_summary')",
+        [membershipId, fixture.studentProfileId],
+      );
+    });
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query(
+        "update class_memberships set state = 'revoked', resolved_at = now() where id = $1",
+        [membershipId],
+      );
+    })).rejects.toThrow();
+  });
+
+  it("rejects data sharing grant scopes outside the explicit sharing vocabulary", async () => {
+    const fixture = await createAccessFixture();
+    const membershipId = randomUUID();
+    await pglite.query(
+      "insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values ($1, $2, $3, 'active', now())",
+      [membershipId, fixture.classId, fixture.studentProfileId],
+    );
+
+    await expect(pglite.query(
+      "insert into data_sharing_grants (class_membership_id, student_profile_id, scope) values ($1, $2, 'all_student_data')",
+      [membershipId, fixture.studentProfileId],
+    )).rejects.toThrow();
+  });
+
+  it("migrates legacy duplicate open memberships deterministically and audits each rejection", async () => {
+    const legacy = await PGlite.create({ extensions: { pgcrypto } });
+    try {
+      const migrations = new URL("../migrations/", import.meta.url);
+      await legacy.exec(await readFile(new URL("0000_foundation.sql", migrations), "utf8"));
+      await legacy.exec(await readFile(new URL("0001_content_import_tracking.sql", migrations), "utf8"));
+      const fixture = await createAccessFixture(legacy);
+      const activeId = randomUUID();
+      const firstRequestedId = randomUUID();
+      const secondRequestedId = randomUUID();
+      const rejectedId = randomUUID();
+      const earliestOpenId = randomUUID();
+      const laterOpenId = randomUUID();
+
+      await legacy.query(
+        `insert into class_memberships
+          (id, class_id, student_profile_id, state, requested_at, resolved_at) values
+          ($1, $2, $3, 'active', '2026-01-03T00:00:00Z', '2026-01-03T01:00:00Z'),
+          ($4, $2, $3, 'requested', '2026-01-01T00:00:00Z', null),
+          ($5, $2, $3, 'requested', '2026-01-02T00:00:00Z', null),
+          ($6, $2, $7, 'rejected', '2026-01-04T00:00:00Z', null),
+          ($8, $2, $7, 'requested', '2026-01-05T00:00:00Z', null),
+          ($9, $2, $7, 'requested', '2026-01-06T00:00:00Z', null)`,
+        [
+          activeId,
+          fixture.classId,
+          fixture.studentProfileId,
+          firstRequestedId,
+          secondRequestedId,
+          rejectedId,
+          fixture.otherStudentProfileId,
+          earliestOpenId,
+          laterOpenId,
+        ],
+      );
+
+      await legacy.exec(await readFile(new URL("0002_access_invariants.sql", migrations), "utf8"));
+
+      const rows = await legacy.query<{ id: string; state: string; resolved_at: Date | null }>(
+        "select id, state, resolved_at from class_memberships where id = any($1::uuid[]) order by requested_at",
+        [[activeId, firstRequestedId, secondRequestedId, rejectedId]],
+      );
+      expect(rows.rows).toEqual([
+        expect.objectContaining({ id: firstRequestedId, state: "rejected", resolved_at: expect.any(Date) }),
+        expect.objectContaining({ id: secondRequestedId, state: "rejected", resolved_at: expect.any(Date) }),
+        expect.objectContaining({ id: activeId, state: "active", resolved_at: expect.any(Date) }),
+        expect.objectContaining({ id: rejectedId, state: "rejected", resolved_at: expect.any(Date) }),
+      ]);
+
+      const noActivePair = await legacy.query<{ id: string; state: string; resolved_at: Date | null }>(
+        "select id, state, resolved_at from class_memberships where id = any($1::uuid[]) order by requested_at",
+        [[earliestOpenId, laterOpenId]],
+      );
+      expect(noActivePair.rows).toEqual([
+        { id: earliestOpenId, state: "requested", resolved_at: null },
+        expect.objectContaining({ id: laterOpenId, state: "rejected", resolved_at: expect.any(Date) }),
+      ]);
+
+      const audits = await legacy.query<{ subject_id: string; metadata: Record<string, unknown> }>(
+        "select subject_id, metadata from audit_events where subject_id = any($1::text[]) order by subject_id",
+        [[firstRequestedId, secondRequestedId, laterOpenId]],
+      );
+      expect(audits.rows).toHaveLength(3);
+      expect(audits.rows.map((row) => row.subject_id)).toEqual(
+        [firstRequestedId, secondRequestedId, laterOpenId].sort(),
+      );
+      expect(audits.rows.every((row) =>
+        row.metadata.oldState === "requested" && row.metadata.newState === "rejected"
+      )).toBe(true);
+    } finally {
+      await legacy.close();
+    }
   });
 });

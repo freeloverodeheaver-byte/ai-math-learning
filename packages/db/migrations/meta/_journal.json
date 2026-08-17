@@ -15,6 +15,13 @@
       "when": 1786983000000,
       "tag": "0001_content_import_tracking",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786990200000,
+      "tag": "0002_access_invariants",
+      "breakpoints": true
     }
   ]
 }

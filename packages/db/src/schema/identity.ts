@@ -63,9 +63,20 @@ export const classMemberships = pgTable("class_memberships", {
   requestedAt: timestamp("requested_at", { withTimezone: true }).defaultNow().notNull(),
   resolvedAt: timestamp("resolved_at", { withTimezone: true })
 }, (table) => [
-  uniqueIndex("class_memberships_active_unique").on(table.classId, table.studentProfileId).where(sql`${table.state} = 'active'`)
+  uniqueIndex("class_memberships_open_unique")
+    .on(table.classId, table.studentProfileId)
+    .where(sql`${table.state} in ('requested', 'active')`),
+  check(
+    "class_memberships_state_resolved_check",
+    sql`(${table.state} = 'requested' and ${table.resolvedAt} is null)
+      or (${table.state} in ('active', 'rejected', 'revoked') and ${table.resolvedAt} is not null)`
+  )
 ]);
 
+// Migration 0002 also installs deferred cross-table integrity triggers. Drizzle
+// cannot express those triggers: an unrevoked grant requires this membership to
+// be active and to reference the same student, and leaving active requires every
+// grant to be revoked in the same transaction.
 export const dataSharingGrants = pgTable("data_sharing_grants", {
   id: uuid("id").defaultRandom().primaryKey(),
   classMembershipId: uuid("class_membership_id").notNull().references(() => classMemberships.id, { onDelete: "cascade" }),
@@ -74,5 +85,9 @@ export const dataSharingGrants = pgTable("data_sharing_grants", {
   grantedAt: timestamp("granted_at", { withTimezone: true }).defaultNow().notNull(),
   revokedAt: timestamp("revoked_at", { withTimezone: true })
 }, (table) => [
-  uniqueIndex("data_sharing_grants_active_unique").on(table.classMembershipId, table.scope).where(sql`${table.revokedAt} is null`)
+  uniqueIndex("data_sharing_grants_active_unique").on(table.classMembershipId, table.scope).where(sql`${table.revokedAt} is null`),
+  check(
+    "data_sharing_grants_scope_check",
+    sql`${table.scope} in ('learning_summary', 'shared_personal_content')`
+  )
 ]);
