@@ -44,6 +44,13 @@ describe("ContentBundleSchema", () => {
     expect(() => ContentBundleSchema.parse(invalid)).toThrow();
   });
 
+  it("rejects the reserved legacy bundle ID", () => {
+    expect(() => ContentBundleSchema.parse({
+      ...completeBundle,
+      bundleId: "__legacy_pre_import__"
+    })).toThrow(/reserved/i);
+  });
+
   it("rejects unknown fields at every bundle level", () => {
     expect(() => ContentBundleSchema.parse({ ...completeBundle, unexpected: true })).toThrow();
     expect(() => ContentBundleSchema.parse({

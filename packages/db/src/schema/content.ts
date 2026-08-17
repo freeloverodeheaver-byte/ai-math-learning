@@ -36,6 +36,8 @@ export const contentBundleVersions = pgTable("content_bundle_versions", {
   check("content_bundle_versions_version_check", sql`${table.version} > 0`)
 ]);
 
+// Stable-key ownership is also guarded by migration-only deferred constraint triggers.
+// Drizzle cannot declare those triggers; callers must create the typed owner in the same transaction first.
 export const knowledgePoints = pgTable("knowledge_points", {
   id: uuid("id").defaultRandom().primaryKey(),
   canonicalId: text("canonical_id").notNull().unique(),

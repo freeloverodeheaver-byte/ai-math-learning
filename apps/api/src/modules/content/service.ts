@@ -182,8 +182,14 @@ export class ContentService {
       else result.newVersions += 1;
     }
 
+    // Acquire source unique-index locks in one global order across all bundles.
+    const sourceIds = new Map<string, string>();
+    for (const sourceLabel of sorted([...new Set(bundle.questions.map((question) => question.sourceLabel))])) {
+      sourceIds.set(sourceLabel, await this.repository.upsertSource(transaction, sourceLabel));
+    }
+
     for (const question of bundle.questions) {
-      const sourceId = await this.repository.upsertSource(transaction, question.sourceLabel);
+      const sourceId = sourceIds.get(question.sourceLabel)!;
       const state = await this.repository.upsertStableQuestion(transaction, question);
       if (!questionChanged(question, state)) {
         result.unchanged += 1;

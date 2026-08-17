@@ -20,7 +20,7 @@ import {
 import { and, count, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ContentRepository } from "../src/modules/content/repository.js";
+import { ContentRepository, type ContentTransaction } from "../src/modules/content/repository.js";
 import { ContentService } from "../src/modules/content/service.js";
 
 const schema = {
@@ -40,6 +40,15 @@ const pglite = await PGlite.create({ extensions: { pgcrypto } });
 const db = drizzle(pglite, { schema });
 const repository = new ContentRepository();
 const service = new ContentService(db, repository);
+
+class RecordingContentRepository extends ContentRepository {
+  readonly sourceLabels: string[] = [];
+
+  override async upsertSource(transaction: ContentTransaction, label: string): Promise<string> {
+    this.sourceLabels.push(label);
+    return super.upsertSource(transaction, label);
+  }
+}
 
 function createBundle(suffix = randomUUID()): ContentBundle {
   return ContentBundleSchema.parse({
@@ -111,47 +120,6 @@ beforeAll(async () => {
     const migrationPath = fileURLToPath(new URL(`../../../packages/db/migrations/${migrationName}`, import.meta.url));
     await pglite.exec(await readFile(migrationPath, "utf8"));
   }
-  await pglite.exec(`
-    CREATE FUNCTION enforce_knowledge_import_reservation() RETURNS trigger LANGUAGE plpgsql AS $$
-    DECLARE owner_bundle_id text;
-    BEGIN
-      SELECT bundle_id INTO owner_bundle_id
-      FROM content_entity_owners
-      WHERE entity_type = 'knowledge' AND entity_key = NEW.canonical_id;
-
-      IF owner_bundle_id IS NULL OR NOT EXISTS (
-        SELECT 1 FROM content_bundle_versions WHERE bundle_id = owner_bundle_id
-      ) THEN
-        RAISE EXCEPTION 'knowledge owner and bundle version must be reserved before stable insert';
-      END IF;
-      RETURN NEW;
-    END;
-    $$;
-
-    CREATE TRIGGER knowledge_import_reservation
-    BEFORE INSERT ON knowledge_points
-    FOR EACH ROW EXECUTE FUNCTION enforce_knowledge_import_reservation();
-
-    CREATE FUNCTION enforce_question_import_reservation() RETURNS trigger LANGUAGE plpgsql AS $$
-    DECLARE owner_bundle_id text;
-    BEGIN
-      SELECT bundle_id INTO owner_bundle_id
-      FROM content_entity_owners
-      WHERE entity_type = 'question' AND entity_key = NEW.external_key;
-
-      IF owner_bundle_id IS NULL OR NOT EXISTS (
-        SELECT 1 FROM content_bundle_versions WHERE bundle_id = owner_bundle_id
-      ) THEN
-        RAISE EXCEPTION 'question owner and bundle version must be reserved before stable insert';
-      END IF;
-      RETURN NEW;
-    END;
-    $$;
-
-    CREATE TRIGGER question_import_reservation
-    BEFORE INSERT ON questions
-    FOR EACH ROW EXECUTE FUNCTION enforce_question_import_reservation();
-  `);
 });
 
 afterAll(async () => {
@@ -303,7 +271,79 @@ describe("ContentService.importBundle", () => {
     }
   );
 
-  it("serializes concurrent identical first imports into created and idempotent results", async () => {
+  it("rolls back fresh reservations when a later question-only ownership conflict is found", async () => {
+    const owned = createBundle();
+    await service.importBundle(owned, operator);
+    const suffix = randomUUID();
+    const foreignBundleId = `foreign-question-${suffix}`;
+    const freshKnowledgeId = `fresh-knowledge-${suffix}`;
+    const freshQuestionKey = `aaa-fresh-question-${suffix}`;
+    const foreignSourceLabel = `Foreign source ${suffix}`;
+    const foreign = ContentBundleSchema.parse({
+      bundleId: foreignBundleId,
+      version: 1,
+      knowledgePoints: [{
+        canonicalId: freshKnowledgeId,
+        name: "Fresh knowledge",
+        grade: 7,
+        semester: 1,
+        prerequisites: []
+      }],
+      questions: [
+        {
+          externalKey: freshQuestionKey,
+          stem: "Fresh question",
+          answer: "Fresh answer",
+          explanation: "Fresh explanation",
+          knowledgeCanonicalIds: [freshKnowledgeId],
+          difficulty: 1,
+          sourceLabel: foreignSourceLabel
+        },
+        {
+          ...owned.questions[0]!,
+          stem: "Foreign mutation",
+          knowledgeCanonicalIds: [freshKnowledgeId],
+          sourceLabel: foreignSourceLabel
+        }
+      ]
+    });
+
+    await expect(service.importBundle(foreign, operator))
+      .rejects.toThrow(new RegExp(`question ${owned.questions[0]!.externalKey} is owned by bundle ${owned.bundleId}`));
+
+    const tableCounts = await Promise.all([
+      db.select({ value: count() }).from(contentBundles).where(eq(contentBundles.bundleId, foreignBundleId)),
+      db.select({ value: count() }).from(contentBundleVersions).where(eq(contentBundleVersions.bundleId, foreignBundleId)),
+      db.select({ value: count() }).from(contentEntityOwners).where(eq(contentEntityOwners.bundleId, foreignBundleId)),
+      db.select({ value: count() }).from(sources).where(eq(sources.label, foreignSourceLabel)),
+      db.select({ value: count() }).from(knowledgePoints).where(eq(knowledgePoints.canonicalId, freshKnowledgeId)),
+      db.select({ value: count() }).from(knowledgePointVersions)
+        .innerJoin(knowledgePoints, eq(knowledgePointVersions.knowledgePointId, knowledgePoints.id))
+        .where(eq(knowledgePoints.canonicalId, freshKnowledgeId)),
+      db.select({ value: count() }).from(knowledgePrerequisites)
+        .innerJoin(knowledgePoints, eq(knowledgePrerequisites.knowledgePointId, knowledgePoints.id))
+        .where(eq(knowledgePoints.canonicalId, freshKnowledgeId)),
+      db.select({ value: count() }).from(questions).where(eq(questions.externalKey, freshQuestionKey)),
+      db.select({ value: count() }).from(questionVersions)
+        .innerJoin(questions, eq(questionVersions.questionId, questions.id))
+        .where(eq(questions.externalKey, freshQuestionKey)),
+      db.select({ value: count() }).from(questionKnowledgePoints)
+        .innerJoin(questions, eq(questionKnowledgePoints.questionId, questions.id))
+        .where(eq(questions.externalKey, freshQuestionKey))
+    ]);
+    expect(tableCounts.map(([row]) => row!.value)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+    const [ownedQuestion] = await db.select().from(questions)
+      .where(eq(questions.externalKey, owned.questions[0]!.externalKey));
+    const [ownedQuestionVersionCount] = await db.select({ value: count() }).from(questionVersions)
+      .where(eq(questionVersions.questionId, ownedQuestion!.id));
+    const [ownedQuestionLinkCount] = await db.select({ value: count() }).from(questionKnowledgePoints)
+      .where(eq(questionKnowledgePoints.questionId, ownedQuestion!.id));
+    expect(ownedQuestionVersionCount!.value).toBe(1);
+    expect(ownedQuestionLinkCount!.value).toBe(1);
+  });
+
+  it("smoke-checks identical overlapping outcomes under PGlite's serialized transaction callbacks", async () => {
     const bundle = createBundle();
 
     const results = await Promise.all([
@@ -322,7 +362,7 @@ describe("ContentService.importBundle", () => {
     expect(trackingCount?.value).toBe(1);
   });
 
-  it("serializes concurrent N and N+1 imports with N+1 as the final current state", async () => {
+  it("smoke-checks N and N+1 outcomes under PGlite with N+1 as the final current state", async () => {
     const versionOne = createBundle();
     await service.importBundle(versionOne, operator);
     const versionTwo = {
@@ -336,10 +376,14 @@ describe("ContentService.importBundle", () => {
       questions: [{ ...versionOne.questions[0]!, stem: "并发版本 3" }]
     };
 
-    await expect(Promise.all([
+    const outcomes = await Promise.allSettled([
       service.importBundle(versionTwo, operator),
       service.importBundle(versionThree, operator)
-    ])).resolves.toHaveLength(2);
+    ]);
+    expect(outcomes[1]!.status).toBe("fulfilled");
+    if (outcomes[0]!.status === "rejected") {
+      expect(String(outcomes[0]!.reason)).toMatch(/lower than latest/i);
+    }
 
     const [stableQuestion] = await db
       .select()
@@ -352,9 +396,11 @@ describe("ContentService.importBundle", () => {
 
     expect(versions).toEqual(expect.arrayContaining([
       { version: 1, stem: versionOne.questions[0]!.stem },
-      { version: 2, stem: "并发版本 2" },
       { version: 3, stem: "并发版本 3" }
     ]));
+    if (outcomes[0]!.status === "fulfilled") {
+      expect(versions).toContainEqual({ version: 2, stem: "并发版本 2" });
+    }
     expect(versions.find((row) => row.version === 3)?.stem).toBe("并发版本 3");
   });
 
@@ -454,6 +500,23 @@ describe("ContentService.importBundle", () => {
       .from(sources)
       .where(eq(sources.label, sourceLabel));
     expect(sourceCount?.value).toBe(1);
+  });
+
+  it("upserts distinct source labels once in deterministic global order", async () => {
+    const bundle = createBundle();
+    const recordingRepository = new RecordingContentRepository();
+    const recordingService = new ContentService(db, recordingRepository);
+    const sourceX = `Source X ${randomUUID()}`;
+    const sourceY = `Source Y ${randomUUID()}`;
+    const questionsInCallerOrder = [sourceY, sourceX, sourceY].map((sourceLabel, index) => ({
+      ...bundle.questions[0]!,
+      externalKey: `${bundle.questions[0]!.externalKey}-${index}`,
+      sourceLabel
+    }));
+
+    await recordingService.importBundle({ ...bundle, questions: questionsInCallerOrder }, operator);
+
+    expect(recordingRepository.sourceLabels).toEqual([sourceX, sourceY]);
   });
 
   it("uses a supplied transaction so its caller can roll back every import write", async () => {

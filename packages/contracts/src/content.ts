@@ -10,6 +10,8 @@ const DifficultySchema = z.union([
   z.literal(5)
 ]);
 
+export const LEGACY_CONTENT_BUNDLE_ID = "__legacy_pre_import__";
+
 export const KnowledgePointInputSchema = z.strictObject({
   canonicalId: z.string().min(1),
   name: z.string().min(1),
@@ -44,7 +46,10 @@ function addDuplicateIssue(
 }
 
 export const ContentBundleSchema = z.strictObject({
-  bundleId: z.string().min(1),
+  bundleId: z.string().min(1).refine(
+    (bundleId) => bundleId !== LEGACY_CONTENT_BUNDLE_ID,
+    { message: "Reserved legacy bundle ID" }
+  ),
   version: z.number().int().positive(),
   knowledgePoints: z.array(KnowledgePointInputSchema).min(1),
   questions: z.array(QuestionInputSchema).min(1)

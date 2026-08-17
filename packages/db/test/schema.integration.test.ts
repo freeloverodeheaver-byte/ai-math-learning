@@ -19,6 +19,7 @@ import {
 import { applyJournaledMigrations } from "./migration-test-utils.js";
 
 const testId = randomUUID();
+const schemaFixtureBundleId = `schema-fixtures-${testId}`;
 const pglite = await PGlite.create({ extensions: { pgcrypto } });
 const db = drizzle(pglite, {
   schema: {
@@ -36,18 +37,38 @@ const db = drizzle(pglite, {
 
 beforeAll(async () => {
   await applyJournaledMigrations(pglite, new URL("../migrations/", import.meta.url));
+  await db.insert(contentBundles).values({ bundleId: schemaFixtureBundleId });
 });
 
 afterAll(async () => {
   await pglite.close();
 });
 
+async function insertOwnedKnowledgePoint(value: typeof knowledgePoints.$inferInsert) {
+  return db.transaction(async (tx) => {
+    await tx.insert(contentEntityOwners).values({
+      entityType: "knowledge",
+      entityKey: value.canonicalId,
+      bundleId: schemaFixtureBundleId
+    });
+    return tx.insert(knowledgePoints).values(value).returning();
+  });
+}
+
+async function insertOwnedQuestion(value: typeof questions.$inferInsert) {
+  return db.transaction(async (tx) => {
+    await tx.insert(contentEntityOwners).values({
+      entityType: "question",
+      entityKey: value.externalKey,
+      bundleId: schemaFixtureBundleId
+    });
+    return tx.insert(questions).values(value).returning();
+  });
+}
+
 describe("foundation schema", () => {
   it("keeps a stable question id while content versions change", async () => {
-    const [question] = await db
-      .insert(questions)
-      .values({ externalKey: `mock-q-${testId}` })
-      .returning();
+    const [question] = await insertOwnedQuestion({ externalKey: `mock-q-${testId}` });
 
     await db.insert(questionVersions).values([
       {
@@ -74,15 +95,12 @@ describe("foundation schema", () => {
   });
 
   it("rejects a prerequisite that does not target a known knowledge point", async () => {
-    const [point] = await db
-      .insert(knowledgePoints)
-      .values({
+    const [point] = await insertOwnedKnowledgePoint({
         canonicalId: `g7.valid.${testId}`,
         name: "Valid",
         grade: 7,
         semester: 1
-      })
-      .returning();
+      });
 
     await expect(
       db.insert(knowledgePrerequisites).values({
@@ -94,7 +112,7 @@ describe("foundation schema", () => {
 
   it("rejects a knowledge point outside the supported junior-middle-school grades", async () => {
     await expect(
-      db.insert(knowledgePoints).values({
+      insertOwnedKnowledgePoint({
         canonicalId: `invalid-grade-${randomUUID()}`,
         name: "Invalid",
         grade: 6,
@@ -104,7 +122,7 @@ describe("foundation schema", () => {
   });
 
   it("rejects a published question version without a source", async () => {
-    const [question] = await db.insert(questions).values({ externalKey: `missing-source-${randomUUID()}` }).returning();
+    const [question] = await insertOwnedQuestion({ externalKey: `missing-source-${randomUUID()}` });
 
     await expect(
       db.insert(questionVersions).values({
@@ -119,7 +137,7 @@ describe("foundation schema", () => {
   });
 
   it("rejects a published question version without a knowledge-point link", async () => {
-    const [question] = await db.insert(questions).values({ externalKey: `missing-link-${randomUUID()}` }).returning();
+    const [question] = await insertOwnedQuestion({ externalKey: `missing-link-${randomUUID()}` });
     const [source] = await db.insert(sources).values({ label: `Source ${randomUUID()}` }).returning();
 
     await expect(
@@ -136,14 +154,14 @@ describe("foundation schema", () => {
   });
 
   it("accepts published content when source and knowledge-point link exist at commit", async () => {
-    const [question] = await db.insert(questions).values({ externalKey: `published-${randomUUID()}` }).returning();
+    const [question] = await insertOwnedQuestion({ externalKey: `published-${randomUUID()}` });
     const [source] = await db.insert(sources).values({ label: `Source ${randomUUID()}` }).returning();
-    const [point] = await db.insert(knowledgePoints).values({
+    const [point] = await insertOwnedKnowledgePoint({
       canonicalId: `published-point-${randomUUID()}`,
       name: "Published point",
       grade: 7,
       semester: 1
-    }).returning();
+    });
 
     await db.transaction(async (tx) => {
       await tx.insert(questionVersions).values({
@@ -160,14 +178,14 @@ describe("foundation schema", () => {
   });
 
   it("rejects deleting the final knowledge-point link from a published question", async () => {
-    const [question] = await db.insert(questions).values({ externalKey: `final-link-${randomUUID()}` }).returning();
+    const [question] = await insertOwnedQuestion({ externalKey: `final-link-${randomUUID()}` });
     const [source] = await db.insert(sources).values({ label: `Source ${randomUUID()}` }).returning();
-    const [point] = await db.insert(knowledgePoints).values({
+    const [point] = await insertOwnedKnowledgePoint({
       canonicalId: `final-link-point-${randomUUID()}`,
       name: "Final link point",
       grade: 7,
       semester: 1
-    }).returning();
+    });
 
     await db.transaction(async (tx) => {
       await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: point.id });
@@ -191,20 +209,20 @@ describe("foundation schema", () => {
   });
 
   it("allows replacing a published question knowledge-point link in one transaction", async () => {
-    const [question] = await db.insert(questions).values({ externalKey: `replace-link-${randomUUID()}` }).returning();
+    const [question] = await insertOwnedQuestion({ externalKey: `replace-link-${randomUUID()}` });
     const [source] = await db.insert(sources).values({ label: `Source ${randomUUID()}` }).returning();
-    const [firstPoint] = await db.insert(knowledgePoints).values({
+    const [firstPoint] = await insertOwnedKnowledgePoint({
       canonicalId: `replace-first-${randomUUID()}`,
       name: "First point",
       grade: 7,
       semester: 1
-    }).returning();
-    const [secondPoint] = await db.insert(knowledgePoints).values({
+    });
+    const [secondPoint] = await insertOwnedKnowledgePoint({
       canonicalId: `replace-second-${randomUUID()}`,
       name: "Second point",
       grade: 7,
       semester: 1
-    }).returning();
+    });
 
     await db.transaction(async (tx) => {
       await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: firstPoint.id });
