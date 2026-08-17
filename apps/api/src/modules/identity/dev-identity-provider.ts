@@ -12,16 +12,21 @@ export class DevIdentityProvider implements IdentityProvider {
   readonly [developmentIdentityProviderMarker] = true;
 
   async resolve(request: FastifyRequest): Promise<Actor | null> {
-    const userIdHeader = request.headers["x-dev-user-id"];
-    const rolesHeader = request.headers["x-dev-roles"];
+    const userIdHeader = singleIdentityHeader(request, "x-dev-user-id");
+    const rolesHeader = singleIdentityHeader(request, "x-dev-roles");
 
-    if (typeof userIdHeader !== "string" || typeof rolesHeader !== "string") {
+    if (userIdHeader === null || rolesHeader === null) {
       return null;
     }
 
     const userId = userIdHeader.trim();
     const roleValues = rolesHeader.split(",").map((value) => value.trim());
-    if (userId.length === 0 || roleValues.length === 0 || roleValues.some((value) => value.length === 0)) {
+    if (
+      userId.length === 0 ||
+      userId.includes(",") ||
+      roleValues.length === 0 ||
+      roleValues.some((value) => value.length === 0)
+    ) {
       return null;
     }
 
@@ -38,6 +43,20 @@ export class DevIdentityProvider implements IdentityProvider {
 
     return { userId, roles };
   }
+}
+
+function singleIdentityHeader(
+  request: FastifyRequest,
+  headerName: "x-dev-user-id" | "x-dev-roles",
+): string | null {
+  const headersDistinct = request.raw?.headersDistinct;
+  if (headersDistinct !== undefined) {
+    const values = headersDistinct[headerName];
+    return Array.isArray(values) && values.length === 1 ? values[0] ?? null : null;
+  }
+
+  const header = request.headers[headerName];
+  return typeof header === "string" ? header : null;
 }
 
 export function isDevIdentityProvider(

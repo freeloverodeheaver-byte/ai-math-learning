@@ -53,7 +53,7 @@ export async function registerActorPlugin(
 }
 
 export function requireActor(request: FastifyRequest): Actor {
-  if (request.actor === null) {
+  if (request.actor == null) {
     throw new UnauthorizedError();
   }
   return request.actor;

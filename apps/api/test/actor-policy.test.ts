@@ -1,7 +1,9 @@
-import Fastify, { type FastifyRequest } from "fastify";
+import * as http from "node:http";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { describe, expect, it } from "vitest";
 import type { Actor } from "@math/contracts";
-import { buildApp } from "../src/app.js";
+import { actorPluginOptionsFromConfig, buildApp } from "../src/app.js";
+import { loadConfig } from "../src/config.js";
 import { DevIdentityProvider } from "../src/modules/identity/dev-identity-provider.js";
 import type { IdentityProvider } from "../src/modules/identity/identity-provider.js";
 import {
@@ -29,6 +31,43 @@ async function buildProbeApp(provider: IdentityProvider) {
     return { actor };
   });
   return app;
+}
+
+async function injectRawHeaders(
+  app: FastifyInstance,
+  headers: string[],
+): Promise<{ statusCode: number; body: unknown }> {
+  const address = app.server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("Fastify did not bind a TCP address");
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        host: "127.0.0.1",
+        port: address.port,
+        method: "GET",
+        path: "/operator-probe",
+        headers: ["host", "127.0.0.1", ...headers],
+      },
+      (response) => {
+        let responseBody = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          responseBody += chunk;
+        });
+        response.on("end", () => {
+          resolve({
+            statusCode: response.statusCode ?? 0,
+            body: responseBody.length === 0 ? null : JSON.parse(responseBody),
+          });
+        });
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 describe("requireRole", () => {
@@ -72,6 +111,7 @@ describe("DevIdentityProvider", () => {
     ["empty user id", { "x-dev-user-id": "  ", "x-dev-roles": "operator" }],
     ["empty roles", { "x-dev-user-id": "user-1", "x-dev-roles": "  " }],
     ["invalid role", { "x-dev-user-id": "user-1", "x-dev-roles": "operator, admin" }],
+    ["comma-joined user id", { "x-dev-user-id": "user-1,user-2", "x-dev-roles": "operator" }],
     ["array user id", { "x-dev-user-id": ["user-1"], "x-dev-roles": "operator" }],
     ["array roles", { "x-dev-user-id": "user-1", "x-dev-roles": ["operator"] }],
   ])("resolves %s as no actor", async (_name, headers) => {
@@ -80,6 +120,56 @@ describe("DevIdentityProvider", () => {
 });
 
 describe("actor plugin startup guard", () => {
+  it("composes the config-selected development provider through buildApp", async () => {
+    const app = await buildApp({
+      actorPlugin: actorPluginOptionsFromConfig(
+        loadConfig({ NODE_ENV: "development", DEV_IDENTITY_ENABLED: "true" }),
+      ),
+    });
+    app.get("/config-probe", async (request) => ({ actor: requireActor(request) }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/config-probe",
+      headers: { "x-dev-user-id": "operator-1", "x-dev-roles": "operator" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ actor: operator });
+    await app.close();
+  });
+
+  it("rejects production development identity through the config composition path", async () => {
+    const options = actorPluginOptionsFromConfig(
+      loadConfig({
+        NODE_ENV: "production",
+        DATABASE_URL: "postgres://math:math@localhost:5432/math",
+        DEV_IDENTITY_ENABLED: "true",
+      }),
+    );
+
+    await expect(buildApp({ actorPlugin: options })).rejects.toThrow(
+      "development identity provider",
+    );
+  });
+
+  it("uses anonymous identity when development identity is disabled", async () => {
+    const app = await buildApp({
+      actorPlugin: actorPluginOptionsFromConfig(
+        loadConfig({ NODE_ENV: "test", DEV_IDENTITY_ENABLED: "false" }),
+      ),
+    });
+    app.get("/disabled-config-probe", async (request) => ({ actor: requireActor(request) }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/disabled-config-probe",
+      headers: { "x-dev-user-id": "operator-1", "x-dev-roles": "operator" },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ code: "UNAUTHORIZED" });
+    await app.close();
+  });
+
   it("rejects the development provider in production even when enabled", async () => {
     const app = Fastify();
     await expect(
@@ -131,6 +221,26 @@ describe("actor plugin startup guard", () => {
 });
 
 describe("actor route policy", () => {
+  it("fails closed when a bare Fastify route calls requireActor", async () => {
+    const app = Fastify({ logger: false });
+    app.get("/bare-probe", async (request) => ({ actor: requireActor(request) }));
+
+    const response = await app.inject({ method: "GET", url: "/bare-probe" });
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ code: "UNAUTHORIZED" });
+    await app.close();
+  });
+
+  it("decorates default buildApp requests with a null anonymous actor", async () => {
+    const app = await buildApp();
+    app.get("/actor-state", async (request) => ({ actor: request.actor }));
+
+    const response = await app.inject({ method: "GET", url: "/actor-state" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ actor: null });
+    await app.close();
+  });
+
   it("keeps health public while composing an injected identity provider", async () => {
     let resolveCount = 0;
     const provider: IdentityProvider = {
@@ -190,6 +300,48 @@ describe("actor route policy", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ actor: operator });
     await app.close();
+  });
+
+  it("rejects duplicate physical development identity headers over HTTP", async () => {
+    const app = await buildProbeApp(new DevIdentityProvider());
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    try {
+      const response = await injectRawHeaders(app, [
+        "x-dev-user-id",
+        "operator-1",
+        "x-dev-user-id",
+        "operator-2",
+        "x-dev-roles",
+        "operator",
+        "x-dev-roles",
+        "teacher",
+      ]);
+      expect(response.statusCode).toBe(401);
+      expect(response.body).toMatchObject({ code: "UNAUTHORIZED" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("accepts one physical comma-separated development roles header over HTTP", async () => {
+    const app = await buildProbeApp(new DevIdentityProvider());
+    await app.listen({ host: "127.0.0.1", port: 0 });
+
+    try {
+      const response = await injectRawHeaders(app, [
+        "x-dev-user-id",
+        "operator-1",
+        "x-dev-roles",
+        "operator,teacher",
+      ]);
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toEqual({
+        actor: { userId: "operator-1", roles: ["operator", "teacher"] },
+      });
+    } finally {
+      await app.close();
+    }
   });
 
   it("keeps actors isolated between injected requests", async () => {
