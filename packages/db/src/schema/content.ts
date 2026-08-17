@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, integer, jsonb, pgEnum, pgTable, smallint, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { check, integer, jsonb, pgEnum, pgTable, primaryKey, smallint, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 export const reviewState = pgEnum("review_state", ["draft", "in_review", "published", "retired"]);
 
@@ -11,9 +11,23 @@ export const sources = pgTable("sources", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
 }, (table) => [uniqueIndex("sources_label_unique").on(table.label)]);
 
+export const contentBundles = pgTable("content_bundles", {
+  bundleId: text("bundle_id").primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
+});
+
+export const contentEntityOwners = pgTable("content_entity_owners", {
+  entityType: text("entity_type").notNull(),
+  entityKey: text("entity_key").notNull(),
+  bundleId: text("bundle_id").notNull().references(() => contentBundles.bundleId, { onDelete: "restrict" })
+}, (table) => [
+  primaryKey({ name: "content_entity_owners_pk", columns: [table.entityType, table.entityKey] }),
+  check("content_entity_owners_type_check", sql`${table.entityType} in ('knowledge', 'question')`)
+]);
+
 export const contentBundleVersions = pgTable("content_bundle_versions", {
   id: uuid("id").defaultRandom().primaryKey(),
-  bundleId: text("bundle_id").notNull(),
+  bundleId: text("bundle_id").notNull().references(() => contentBundles.bundleId, { onDelete: "restrict" }),
   version: integer("version").notNull(),
   payloadHash: text("payload_hash").notNull(),
   importedAt: timestamp("imported_at", { withTimezone: true }).defaultNow().notNull()

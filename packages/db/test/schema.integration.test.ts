@@ -1,13 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/pglite";
 import { and, eq } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import {
+  contentBundles,
+  contentBundleVersions,
+  contentEntityOwners,
   knowledgePoints,
   knowledgePrerequisites,
   questionKnowledgePoints,
@@ -15,16 +16,26 @@ import {
   questions,
   sources
 } from "../src/schema";
+import { applyJournaledMigrations } from "./migration-test-utils.js";
 
 const testId = randomUUID();
 const pglite = await PGlite.create({ extensions: { pgcrypto } });
 const db = drizzle(pglite, {
-  schema: { knowledgePoints, knowledgePrerequisites, questionKnowledgePoints, questionVersions, questions, sources }
+  schema: {
+    contentBundles,
+    contentBundleVersions,
+    contentEntityOwners,
+    knowledgePoints,
+    knowledgePrerequisites,
+    questionKnowledgePoints,
+    questionVersions,
+    questions,
+    sources
+  }
 });
 
 beforeAll(async () => {
-  const migration = await readFile(fileURLToPath(new URL("../migrations/0000_foundation.sql", import.meta.url)), "utf8");
-  await pglite.exec(migration);
+  await applyJournaledMigrations(pglite, new URL("../migrations/", import.meta.url));
 });
 
 afterAll(async () => {
@@ -109,7 +120,7 @@ describe("foundation schema", () => {
 
   it("rejects a published question version without a knowledge-point link", async () => {
     const [question] = await db.insert(questions).values({ externalKey: `missing-link-${randomUUID()}` }).returning();
-    const [source] = await db.insert(sources).values({ label: "Source" }).returning();
+    const [source] = await db.insert(sources).values({ label: `Source ${randomUUID()}` }).returning();
 
     await expect(
       db.insert(questionVersions).values({
@@ -126,7 +137,7 @@ describe("foundation schema", () => {
 
   it("accepts published content when source and knowledge-point link exist at commit", async () => {
     const [question] = await db.insert(questions).values({ externalKey: `published-${randomUUID()}` }).returning();
-    const [source] = await db.insert(sources).values({ label: "Source" }).returning();
+    const [source] = await db.insert(sources).values({ label: `Source ${randomUUID()}` }).returning();
     const [point] = await db.insert(knowledgePoints).values({
       canonicalId: `published-point-${randomUUID()}`,
       name: "Published point",
@@ -150,7 +161,7 @@ describe("foundation schema", () => {
 
   it("rejects deleting the final knowledge-point link from a published question", async () => {
     const [question] = await db.insert(questions).values({ externalKey: `final-link-${randomUUID()}` }).returning();
-    const [source] = await db.insert(sources).values({ label: "Source" }).returning();
+    const [source] = await db.insert(sources).values({ label: `Source ${randomUUID()}` }).returning();
     const [point] = await db.insert(knowledgePoints).values({
       canonicalId: `final-link-point-${randomUUID()}`,
       name: "Final link point",
@@ -181,7 +192,7 @@ describe("foundation schema", () => {
 
   it("allows replacing a published question knowledge-point link in one transaction", async () => {
     const [question] = await db.insert(questions).values({ externalKey: `replace-link-${randomUUID()}` }).returning();
-    const [source] = await db.insert(sources).values({ label: "Source" }).returning();
+    const [source] = await db.insert(sources).values({ label: `Source ${randomUUID()}` }).returning();
     const [firstPoint] = await db.insert(knowledgePoints).values({
       canonicalId: `replace-first-${randomUUID()}`,
       name: "First point",
@@ -222,5 +233,39 @@ describe("foundation schema", () => {
   it("declares the named anti-self prerequisite check", () => {
     expect(getTableConfig(knowledgePrerequisites).checks.map((constraint) => constraint.name))
       .toContain("knowledge_prerequisites_not_self");
+  });
+
+  it("enforces bundle tracking and entity ownership constraints from the full migration journal", async () => {
+    const bundleId = `bundle-${randomUUID()}`;
+    await db.insert(contentBundles).values({ bundleId });
+    await db.insert(contentBundleVersions).values({ bundleId, version: 1, payloadHash: "a".repeat(64) });
+    await db.insert(contentEntityOwners).values({
+      entityType: "knowledge",
+      entityKey: `knowledge-${randomUUID()}`,
+      bundleId
+    });
+
+    await expect(db.insert(contentBundleVersions).values({
+      bundleId,
+      version: 0,
+      payloadHash: "b".repeat(64)
+    })).rejects.toThrow();
+    await expect(db.insert(contentEntityOwners).values({
+      entityType: "invalid",
+      entityKey: `invalid-${randomUUID()}`,
+      bundleId
+    })).rejects.toThrow();
+
+    const indexes = await pglite.query<{ indexname: string }>(
+      "select indexname from pg_indexes where indexname in ('sources_label_unique', 'content_bundle_versions_bundle_version_unique') order by indexname"
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      "content_bundle_versions_bundle_version_unique",
+      "sources_label_unique"
+    ]);
+    expect(getTableConfig(contentBundleVersions).checks.map((constraint) => constraint.name))
+      .toContain("content_bundle_versions_version_check");
+    expect(getTableConfig(contentEntityOwners).checks.map((constraint) => constraint.name))
+      .toContain("content_entity_owners_type_check");
   });
 });

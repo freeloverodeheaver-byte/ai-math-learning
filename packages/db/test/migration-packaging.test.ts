@@ -1,10 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
+import { applyJournaledMigrations } from "./migration-test-utils.js";
 
-const builtMigration = fileURLToPath(new URL("../dist/migrations/0000_foundation.sql", import.meta.url));
 let pglite: PGlite | undefined;
 
 afterEach(async () => {
@@ -13,12 +11,31 @@ afterEach(async () => {
 });
 
 describe("built migration package", () => {
-  it("includes the committed migration and can execute it without source migrations", async () => {
-    const sql = await readFile(builtMigration, "utf8");
+  it("executes every built journaled migration without source migrations", async () => {
     pglite = await PGlite.create({ extensions: { pgcrypto } });
-    await pglite.exec(sql);
+    const tags = await applyJournaledMigrations(pglite, new URL("../dist/migrations/", import.meta.url));
 
-    await expect(pglite.query("select to_regclass('public.questions') as table_name"))
-      .resolves.toMatchObject({ rows: [{ table_name: "questions" }] });
+    expect(tags.length).toBeGreaterThan(1);
+    await expect(pglite.query(
+      "select to_regclass('public.questions') as questions, to_regclass('public.content_bundles') as bundles, to_regclass('public.content_entity_owners') as owners"
+    )).resolves.toMatchObject({
+      rows: [{ questions: "questions", bundles: "content_bundles", owners: "content_entity_owners" }]
+    });
+
+    const indexes = await pglite.query<{ indexname: string }>(
+      "select indexname from pg_indexes where indexname in ('sources_label_unique', 'content_bundle_versions_bundle_version_unique') order by indexname"
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      "content_bundle_versions_bundle_version_unique",
+      "sources_label_unique"
+    ]);
+
+    const checks = await pglite.query<{ constraint_name: string }>(
+      "select constraint_name from information_schema.check_constraints where constraint_name in ('content_bundle_versions_version_check', 'content_entity_owners_type_check') order by constraint_name"
+    );
+    expect(checks.rows.map((row) => row.constraint_name)).toEqual([
+      "content_bundle_versions_version_check",
+      "content_entity_owners_type_check"
+    ]);
   });
 });

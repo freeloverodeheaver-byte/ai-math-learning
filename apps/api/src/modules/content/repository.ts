@@ -1,6 +1,8 @@
 import type { KnowledgePointInput, QuestionInput } from "@math/contracts";
 import {
+  contentBundles,
   contentBundleVersions,
+  contentEntityOwners,
   knowledgePointVersions,
   knowledgePoints,
   knowledgePrerequisites,
@@ -9,7 +11,7 @@ import {
   questions,
   sources
 } from "@math/db";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
 
@@ -19,6 +21,11 @@ export interface BundleVersionState {
   existing: { payloadHash: string } | undefined;
   latestVersion: number | undefined;
 }
+
+export type ContentEntityOwner = {
+  entityType: "knowledge" | "question";
+  entityKey: string;
+};
 
 export interface StableKnowledgeState {
   id: string;
@@ -47,6 +54,47 @@ export interface StableQuestionState {
 }
 
 export class ContentRepository {
+  async lockBundle(transaction: ContentTransaction, bundleId: string): Promise<void> {
+    await transaction
+      .insert(contentBundles)
+      .values({ bundleId })
+      .onConflictDoNothing({ target: contentBundles.bundleId });
+
+    const [locked] = await transaction
+      .select({ bundleId: contentBundles.bundleId })
+      .from(contentBundles)
+      .where(eq(contentBundles.bundleId, bundleId))
+      .for("update");
+    if (locked === undefined) throw new Error(`Unable to lock bundle ${bundleId}`);
+  }
+
+  async lockEntityOwner(
+    transaction: ContentTransaction,
+    bundleId: string,
+    owner: ContentEntityOwner
+  ): Promise<void> {
+    await transaction
+      .insert(contentEntityOwners)
+      .values({ ...owner, bundleId })
+      .onConflictDoNothing({ target: [contentEntityOwners.entityType, contentEntityOwners.entityKey] });
+
+    const [locked] = await transaction
+      .select({ bundleId: contentEntityOwners.bundleId })
+      .from(contentEntityOwners)
+      .where(and(
+        eq(contentEntityOwners.entityType, owner.entityType),
+        eq(contentEntityOwners.entityKey, owner.entityKey)
+      ))
+      .for("update");
+
+    if (locked === undefined) {
+      throw new Error(`Unable to lock ${owner.entityType} ${owner.entityKey}`);
+    }
+    if (locked.bundleId !== bundleId) {
+      throw new Error(`${owner.entityType} ${owner.entityKey} is owned by bundle ${locked.bundleId}`);
+    }
+  }
+
   async findBundleVersion(
     transaction: ContentTransaction,
     bundleId: string,
@@ -88,6 +136,7 @@ export class ContentRepository {
     transaction: ContentTransaction,
     input: KnowledgePointInput
   ): Promise<StableKnowledgeState> {
+    // ContentService holds this canonical ID's durable owner row lock, so this select/insert cannot race.
     const [existing] = await transaction
       .select({ id: knowledgePoints.id })
       .from(knowledgePoints)
@@ -154,6 +203,7 @@ export class ContentRepository {
     transaction: ContentTransaction,
     input: QuestionInput
   ): Promise<StableQuestionState> {
+    // ContentService holds this external key's durable owner row lock, so this select/insert cannot race.
     const [existing] = await transaction
       .select({ id: questions.id })
       .from(questions)

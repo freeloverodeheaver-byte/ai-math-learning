@@ -7,7 +7,13 @@ import {
   type QuestionInput
 } from "@math/contracts";
 import type { PgDatabase } from "drizzle-orm/pg-core";
-import { ContentRepository, type ContentTransaction, type StableKnowledgeState, type StableQuestionState } from "./repository.js";
+import {
+  ContentRepository,
+  type ContentEntityOwner,
+  type ContentTransaction,
+  type StableKnowledgeState,
+  type StableQuestionState
+} from "./repository.js";
 
 export interface ImportResult {
   createdKnowledge: number;
@@ -22,6 +28,11 @@ function compareStrings(left: string, right: string): number {
   if (left < right) return -1;
   if (left > right) return 1;
   return 0;
+}
+
+function compareOwners(left: ContentEntityOwner, right: ContentEntityOwner): number {
+  const typeOrder = compareStrings(left.entityType, right.entityType);
+  return typeOrder === 0 ? compareStrings(left.entityKey, right.entityKey) : typeOrder;
 }
 
 function sorted(values: readonly string[]): string[] {
@@ -104,6 +115,7 @@ export class ContentService {
     transaction: ContentTransaction
   ): Promise<ImportResult> {
     const hash = payloadHash(bundle);
+    await this.repository.lockBundle(transaction, bundle.bundleId);
     const tracking = await this.repository.findBundleVersion(transaction, bundle.bundleId, bundle.version);
 
     if (tracking.latestVersion !== undefined && bundle.version < tracking.latestVersion) {
@@ -119,6 +131,24 @@ export class ContentService {
         newVersions: 0,
         unchanged: bundle.knowledgePoints.length + bundle.questions.length
       };
+    }
+
+    // Reserve the revision while the bundle row is locked. Any later failure rolls this row back with the import.
+    await this.repository.recordBundleVersion(transaction, bundle.bundleId, bundle.version, hash);
+
+    // The deterministic global order prevents overlapping bundles from acquiring owner locks in opposite orders.
+    const owners: ContentEntityOwner[] = [
+      ...bundle.knowledgePoints.map((point) => ({
+        entityType: "knowledge" as const,
+        entityKey: point.canonicalId
+      })),
+      ...bundle.questions.map((question) => ({
+        entityType: "question" as const,
+        entityKey: question.externalKey
+      }))
+    ].sort(compareOwners);
+    for (const owner of owners) {
+      await this.repository.lockEntityOwner(transaction, bundle.bundleId, owner);
     }
 
     const result: ImportResult = {
@@ -169,7 +199,6 @@ export class ContentService {
       else result.newVersions += 1;
     }
 
-    await this.repository.recordBundleVersion(transaction, bundle.bundleId, bundle.version, hash);
     return result;
   }
 }
