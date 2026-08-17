@@ -107,6 +107,8 @@ All later tasks use these names exactly:
 ```ts
 export type Role = "student" | "guardian" | "teacher" | "operator";
 
+export const RoleSchema = z.enum(["student", "guardian", "teacher", "operator"]);
+
 export interface Actor {
   userId: string;
   roles: readonly Role[];
@@ -414,7 +416,7 @@ git commit -m "feat: add versioned content and identity schema"
 
 **Interfaces:**
 - Produces: `ContentBundleSchema` and inferred `ContentBundle`.
-- Produces: `ContentService.importBundle(bundle, actor): Promise<ImportResult>`.
+- Produces: `ContentService.importBundle(bundle, actor, transaction?): Promise<ImportResult>`; it opens a transaction only when the caller does not provide one.
 - Produces: repository primitives `findBundleVersion`, `upsertStableKnowledgePoint`, `upsertStableQuestion`, `appendKnowledgeVersion`, and `appendQuestionVersion`, all accepting the transaction passed by `ContentService`.
 - Produces: `ImportResult = { createdKnowledge: number; createdQuestions: number; newVersions: number; unchanged: number }`.
 - Consumes: database version and source tables from Task 2.
@@ -476,7 +478,7 @@ export const ContentBundleSchema = z.object({
 });
 ```
 
-The importer must execute in one transaction, create stable entities by `canonicalId` or `externalKey`, append a version only when versioned fields changed, reject version regression, and append an `content.bundle.imported` audit event.
+The importer must execute in one transaction, create stable entities by `canonicalId` or `externalKey`, append a version only when versioned fields changed, and reject version regression. Task 6 supplies a transaction and appends `content.bundle.imported` in that same transaction; Task 3 must not write an audit event directly.
 
 - [ ] **Step 4: Write the failing idempotency and replacement tests**
 
@@ -567,7 +569,7 @@ export class DevIdentityProvider implements IdentityProvider {
     const userId = request.headers["x-dev-user-id"];
     const roles = request.headers["x-dev-roles"];
     if (typeof userId !== "string" || typeof roles !== "string") return null;
-    return { userId, roles: roles.split(",") as Role[] };
+    return { userId, roles: z.array(RoleSchema).parse(roles.split(",")) };
   }
 }
 ```
@@ -658,12 +660,12 @@ export async function decideStudentRead(
 Required state transitions:
 
 ```text
-requested -> guardian_approved -> active
+requested -> active
 requested -> rejected
 active -> revoked
 ```
 
-Only the linked guardian may approve or revoke. A teacher may issue an invite and see request status but cannot activate sharing. Every transition appends an audit event containing membership ID, student profile ID, class ID, old state, and new state.
+Only the linked guardian may approve, reject, or revoke. Approval changes `requested` directly to `active` and creates the sharing grant in the same transaction. A teacher may issue an invite and see request status but cannot activate sharing. Every transition appends an audit event containing membership ID, student profile ID, class ID, old state, and new state.
 
 - [ ] **Step 5: Run permission, integration, and type tests**
 
@@ -691,7 +693,7 @@ git commit -m "feat: add guardian-approved class data sharing"
 - Test: `apps/api/test/operator-content-api.test.ts`
 
 **Interfaces:**
-- Produces: `AuditService.record(event: AuditEventInput): Promise<void>`.
+- Produces: `AuditService.record(transaction, event: AuditEventInput): Promise<void>`.
 - Produces routes: `POST /operator/content/bundles/validate` and `POST /operator/content/bundles/import`.
 - Consumes: `ContentBundleSchema`, `ContentService.importBundle`, `requireRole`, and the audit table.
 
@@ -745,13 +747,13 @@ export interface AuditEventInput {
 
 export class AuditService {
   constructor(private readonly repository: AuditRepository) {}
-  record(event: AuditEventInput) {
-    return this.repository.append(event);
+  record(transaction: DatabaseTransaction, event: AuditEventInput) {
+    return this.repository.append(transaction, event);
   }
 }
 ```
 
-Validation must return structured Zod issues without persisting. Import must require the operator role, run the content transaction, then append audit in the same database transaction so publication cannot succeed without its audit record.
+Validation must return structured Zod issues without persisting. Import must require the operator role and run one `db.transaction` callback that passes `transaction` to both `ContentService.importBundle` and `AuditService.record`, so publication cannot succeed without its audit record.
 
 - [ ] **Step 4: Add negative tests for teacher access, invalid references, and version regression**
 
