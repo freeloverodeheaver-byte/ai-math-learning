@@ -11,11 +11,21 @@ export const sources = pgTable("sources", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
 }, (table) => [uniqueIndex("sources_label_unique").on(table.label)]);
 
+export const sourceMergeProvenance = pgTable("source_merge_provenance", {
+  originalSourceId: uuid("original_source_id").primaryKey(),
+  canonicalSourceId: uuid("canonical_source_id").notNull().references(() => sources.id, { onDelete: "restrict" }),
+  label: text("label").notNull(),
+  reference: text("reference"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull()
+});
+
 export const contentBundles = pgTable("content_bundles", {
   bundleId: text("bundle_id").primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
 });
 
+// Migration-only deferred triggers protect both stable-to-owner and owner-to-stable integrity.
 export const contentEntityOwners = pgTable("content_entity_owners", {
   entityType: text("entity_type").notNull(),
   entityKey: text("entity_key").notNull(),

@@ -1,3 +1,37 @@
+CREATE TABLE source_merge_provenance (
+  original_source_id uuid PRIMARY KEY,
+  canonical_source_id uuid NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  label text NOT NULL,
+  reference text,
+  metadata jsonb NOT NULL,
+  created_at timestamptz NOT NULL
+);
+
+WITH ranked_sources AS (
+  SELECT
+    id,
+    first_value(id) OVER (PARTITION BY label ORDER BY created_at, id) AS survivor_id
+  FROM sources
+)
+INSERT INTO source_merge_provenance (
+  original_source_id,
+  canonical_source_id,
+  label,
+  reference,
+  metadata,
+  created_at
+)
+SELECT
+  duplicate.id,
+  ranked.survivor_id,
+  duplicate.label,
+  duplicate.reference,
+  duplicate.metadata,
+  duplicate.created_at
+FROM sources AS duplicate
+INNER JOIN ranked_sources AS ranked ON ranked.id = duplicate.id
+WHERE duplicate.id <> ranked.survivor_id;
+
 WITH ranked_sources AS (
   SELECT
     id,
@@ -93,6 +127,38 @@ CREATE CONSTRAINT TRIGGER questions_owner_integrity
 AFTER INSERT OR UPDATE OF external_key ON questions
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION enforce_question_owner();
+
+CREATE FUNCTION enforce_owner_stable_integrity() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.entity_type = 'knowledge'
+    AND EXISTS (SELECT 1 FROM knowledge_points WHERE canonical_id = OLD.entity_key)
+    AND NOT EXISTS (
+      SELECT 1 FROM content_entity_owners
+      WHERE entity_type = 'knowledge' AND entity_key = OLD.entity_key
+    ) THEN
+    RAISE EXCEPTION 'stable knowledge point % requires a matching content owner', OLD.entity_key;
+  END IF;
+
+  IF OLD.entity_type = 'question'
+    AND EXISTS (SELECT 1 FROM questions WHERE external_key = OLD.entity_key)
+    AND NOT EXISTS (
+      SELECT 1 FROM content_entity_owners
+      WHERE entity_type = 'question' AND entity_key = OLD.entity_key
+    ) THEN
+    RAISE EXCEPTION 'stable question % requires a matching content owner', OLD.entity_key;
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER content_entity_owners_stable_integrity
+AFTER DELETE OR UPDATE OF entity_type, entity_key ON content_entity_owners
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION enforce_owner_stable_integrity();
 
 CREATE TABLE content_bundle_versions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

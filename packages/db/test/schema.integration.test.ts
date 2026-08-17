@@ -14,6 +14,7 @@ import {
   questionKnowledgePoints,
   questionVersions,
   questions,
+  sourceMergeProvenance,
   sources
 } from "../src/schema";
 import { applyJournaledMigrations } from "./migration-test-utils.js";
@@ -31,6 +32,7 @@ const db = drizzle(pglite, {
     questionKnowledgePoints,
     questionVersions,
     questions,
+    sourceMergeProvenance,
     sources
   }
 });
@@ -285,5 +287,73 @@ describe("foundation schema", () => {
       .toContain("content_bundle_versions_version_check");
     expect(getTableConfig(contentEntityOwners).checks.map((constraint) => constraint.name))
       .toContain("content_entity_owners_type_check");
+    await expect(db.select().from(sourceMergeProvenance)).resolves.toEqual([]);
+  });
+
+  it("prevents deleting or re-keying an owner while its stable entity remains", async () => {
+    const canonicalId = `owner-protected-${randomUUID()}`;
+    await insertOwnedKnowledgePoint({
+      canonicalId,
+      name: "Owner protected",
+      grade: 7,
+      semester: 1
+    });
+
+    await expect(db.delete(contentEntityOwners).where(and(
+      eq(contentEntityOwners.entityType, "knowledge"),
+      eq(contentEntityOwners.entityKey, canonicalId)
+    ))).rejects.toThrow(/owner/i);
+    await expect(db.update(contentEntityOwners)
+      .set({ entityKey: `${canonicalId}-moved` })
+      .where(and(
+        eq(contentEntityOwners.entityType, "knowledge"),
+        eq(contentEntityOwners.entityKey, canonicalId)
+      ))).rejects.toThrow(/owner/i);
+
+    const survivingOwner = await db.select().from(contentEntityOwners).where(and(
+      eq(contentEntityOwners.entityType, "knowledge"),
+      eq(contentEntityOwners.entityKey, canonicalId)
+    ));
+    expect(survivingOwner).toHaveLength(1);
+    const movedOwner = await db.select().from(contentEntityOwners)
+      .where(eq(contentEntityOwners.entityKey, `${canonicalId}-moved`));
+    expect(movedOwner).toEqual([]);
+
+    const removableCanonicalId = `owner-removable-${randomUUID()}`;
+    await insertOwnedKnowledgePoint({
+      canonicalId: removableCanonicalId,
+      name: "Owner removable",
+      grade: 7,
+      semester: 1
+    });
+    await expect(db.transaction(async (tx) => {
+      await tx.delete(knowledgePoints).where(eq(knowledgePoints.canonicalId, removableCanonicalId));
+      await tx.delete(contentEntityOwners).where(and(
+        eq(contentEntityOwners.entityType, "knowledge"),
+        eq(contentEntityOwners.entityKey, removableCanonicalId)
+      ));
+    })).resolves.toBeUndefined();
+  });
+
+  it("prevents deleting or changing the type of a question owner while its stable entity remains", async () => {
+    const externalKey = `question-owner-protected-${randomUUID()}`;
+    await insertOwnedQuestion({ externalKey });
+
+    await expect(db.delete(contentEntityOwners).where(and(
+      eq(contentEntityOwners.entityType, "question"),
+      eq(contentEntityOwners.entityKey, externalKey)
+    ))).rejects.toThrow(/owner/i);
+    await expect(db.update(contentEntityOwners)
+      .set({ entityType: "knowledge" })
+      .where(and(
+        eq(contentEntityOwners.entityType, "question"),
+        eq(contentEntityOwners.entityKey, externalKey)
+      ))).rejects.toThrow(/owner/i);
+
+    const survivingOwner = await db.select().from(contentEntityOwners).where(and(
+      eq(contentEntityOwners.entityType, "question"),
+      eq(contentEntityOwners.entityKey, externalKey)
+    ));
+    expect(survivingOwner).toHaveLength(1);
   });
 });

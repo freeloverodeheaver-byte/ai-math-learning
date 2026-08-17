@@ -54,10 +54,14 @@ describe("0000 to 0001 content ownership upgrade", () => {
       const sourceLabel = `Legacy duplicate source ${suffix}`;
       const [survivorSource] = await db.insert(sources).values({
         label: sourceLabel,
+        reference: "legacy-canonical-reference",
+        metadata: { origin: "canonical", page: 3 },
         createdAt: new Date("2020-01-01T00:00:00.000Z")
       }).returning();
       const [duplicateSource] = await db.insert(sources).values({
         label: sourceLabel,
+        reference: "legacy-duplicate-reference",
+        metadata: { origin: "duplicate", nested: { page: 7 } },
         createdAt: new Date("2021-01-01T00:00:00.000Z")
       }).returning();
       const [prerequisite] = await db.insert(knowledgePoints).values({
@@ -79,6 +83,7 @@ describe("0000 to 0001 content ownership upgrade", () => {
           name: prerequisite!.name,
           grade: 7,
           semester: 1,
+          sourceId: duplicateSource!.id,
           reviewState: "draft"
         },
         {
@@ -117,9 +122,38 @@ describe("0000 to 0001 content ownership upgrade", () => {
       const mergedSources = await db.select().from(sources).where(eq(sources.label, sourceLabel));
       expect(mergedSources).toHaveLength(1);
       expect(mergedSources[0]!.id).toBe(survivorSource!.id);
+      expect(mergedSources[0]).toMatchObject({
+        reference: "legacy-canonical-reference",
+        metadata: { origin: "canonical", page: 3 },
+        createdAt: new Date("2020-01-01T00:00:00.000Z")
+      });
       const [preservedVersion] = await db.select().from(questionVersions)
         .where(eq(questionVersions.id, legacyQuestionVersion!.id));
       expect(preservedVersion!.sourceId).toBe(survivorSource!.id);
+      const [preservedKnowledgeVersion] = await db.select().from(knowledgePointVersions)
+        .where(eq(knowledgePointVersions.knowledgePointId, prerequisite!.id));
+      expect(preservedKnowledgeVersion!.sourceId).toBe(survivorSource!.id);
+
+      const provenance = await pglite.query<{
+        original_source_id: string;
+        canonical_source_id: string;
+        label: string;
+        reference: string | null;
+        metadata: Record<string, unknown>;
+        created_at: Date;
+      }>(`
+        SELECT original_source_id, canonical_source_id, label, reference, metadata, created_at
+        FROM source_merge_provenance
+        WHERE original_source_id = '${duplicateSource!.id}'
+      `);
+      expect(provenance.rows).toEqual([{
+        original_source_id: duplicateSource!.id,
+        canonical_source_id: survivorSource!.id,
+        label: sourceLabel,
+        reference: "legacy-duplicate-reference",
+        metadata: { origin: "duplicate", nested: { page: 7 } },
+        created_at: new Date("2021-01-01T00:00:00.000Z")
+      }]);
 
       const legacyBundles = await db.select().from(contentBundles);
       expect(legacyBundles.map((row) => row.bundleId)).toEqual([LEGACY_BUNDLE_ID]);

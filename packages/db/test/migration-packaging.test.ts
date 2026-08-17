@@ -17,9 +17,14 @@ describe("built migration package", () => {
 
     expect(tags.length).toBeGreaterThan(1);
     await expect(pglite.query(
-      "select to_regclass('public.questions') as questions, to_regclass('public.content_bundles') as bundles, to_regclass('public.content_entity_owners') as owners"
+      "select to_regclass('public.questions') as questions, to_regclass('public.content_bundles') as bundles, to_regclass('public.content_entity_owners') as owners, to_regclass('public.source_merge_provenance') as provenance"
     )).resolves.toMatchObject({
-      rows: [{ questions: "questions", bundles: "content_bundles", owners: "content_entity_owners" }]
+      rows: [{
+        questions: "questions",
+        bundles: "content_bundles",
+        owners: "content_entity_owners",
+        provenance: "source_merge_provenance"
+      }]
     });
 
     const indexes = await pglite.query<{ indexname: string }>(
