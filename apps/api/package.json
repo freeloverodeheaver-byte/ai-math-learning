@@ -5,15 +5,20 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/main.ts",
+    "seed": "pnpm --filter @math/api... build && node dist/src/modules/content/seed.js",
     "start": "tsx src/main.ts",
     "test": "vitest run --exclude dist/**",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@math/contracts": "workspace:*",
+    "@math/db": "workspace:*",
+    "drizzle-orm": "0.45.2",
     "fastify": "^5.12.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.4.6",
     "@types/node": "^26.2.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",

@@ -9,7 +9,18 @@ export const sources = pgTable("sources", {
   reference: text("reference"),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().default({}).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
-});
+}, (table) => [uniqueIndex("sources_label_unique").on(table.label)]);
+
+export const contentBundleVersions = pgTable("content_bundle_versions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  bundleId: text("bundle_id").notNull(),
+  version: integer("version").notNull(),
+  payloadHash: text("payload_hash").notNull(),
+  importedAt: timestamp("imported_at", { withTimezone: true }).defaultNow().notNull()
+}, (table) => [
+  uniqueIndex("content_bundle_versions_bundle_version_unique").on(table.bundleId, table.version),
+  check("content_bundle_versions_version_check", sql`${table.version} > 0`)
+]);
 
 export const knowledgePoints = pgTable("knowledge_points", {
   id: uuid("id").defaultRandom().primaryKey(),

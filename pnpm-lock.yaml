@@ -10,6 +10,15 @@ importers:
 
   apps/api:
     dependencies:
+      '@math/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@math/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@electric-sql/pglite@0.4.6)(@types/pg@8.21.0)(pg@8.23.0)
       fastify:
         specifier: ^5.12.0
         version: 5.12.0
@@ -17,6 +26,9 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: 0.4.6
+        version: 0.4.6
       '@types/node':
         specifier: ^26.2.0
         version: 26.2.0
@@ -28,6 +40,25 @@ importers:
         version: 7.0.2
       vitest:
         specifier: ^4.1.10
+        version: 4.1.10(@types/node@26.2.0)(vite@8.2.1(@types/node@26.2.0)(esbuild@0.28.2)(tsx@4.23.12))
+
+  packages/contracts:
+    dependencies:
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: 26.2.0
+        version: 26.2.0
+      tsx:
+        specifier: 4.23.12
+        version: 4.23.12
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 4.1.10
         version: 4.1.10(@types/node@26.2.0)(vite@8.2.1(@types/node@26.2.0)(esbuild@0.28.2)(tsx@4.23.12))
 
   packages/db:
