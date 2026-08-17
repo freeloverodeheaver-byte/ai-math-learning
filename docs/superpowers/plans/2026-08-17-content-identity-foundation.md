@@ -294,6 +294,8 @@ pnpm --dir packages/db add -D drizzle-kit @types/pg typescript vitest
 
 Create `infra/compose.yaml` with PostgreSQL, database `math_learning`, user `math_app`, a health check using `pg_isready`, and a named volume. Bind only to `127.0.0.1:5432`.
 
+The canonical developer runtime remains Docker Compose. When Docker is unavailable in the execution environment, the integration test may start a real ephemeral PostgreSQL server with the `embedded-postgres` test dependency. It must run the same migration and constraint assertions, clean up its data directory/process, and must not substitute SQLite, an in-memory SQL mock, or a skipped test.
+
 - [ ] **Step 2: Write the failing schema integration test**
 
 ```ts
