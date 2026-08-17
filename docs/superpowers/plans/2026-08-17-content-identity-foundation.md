@@ -409,19 +409,25 @@ git commit -m "feat: add versioned content and identity schema"
 
 **Files:**
 - Create: `packages/contracts/package.json`
+- Create: `packages/contracts/src/actor.ts`
 - Create: `packages/contracts/src/content.ts`
 - Create: `packages/contracts/src/index.ts`
+- Modify: `packages/db/src/schema/content.ts`
+- Create: `packages/db/migrations/0001_content_import_tracking.sql`
 - Create: `seed/mock-content-grade-7-semester-1.json`
 - Create: `apps/api/src/modules/content/repository.ts`
 - Create: `apps/api/src/modules/content/service.ts`
+- Create: `apps/api/src/modules/content/seed.ts`
 - Test: `apps/api/test/content-import.test.ts`
 
 **Interfaces:**
 - Produces: `ContentBundleSchema` and inferred `ContentBundle`.
 - Produces: `ContentService.importBundle(bundle, actor, transaction?): Promise<ImportResult>`; it opens a transaction only when the caller does not provide one.
-- Produces: repository primitives `findBundleVersion`, `upsertStableKnowledgePoint`, `upsertStableQuestion`, `appendKnowledgeVersion`, and `appendQuestionVersion`, all accepting the transaction passed by `ContentService`.
+- Produces: repository primitives `findBundleVersion`, `recordBundleVersion`, `upsertSource`, `upsertStableKnowledgePoint`, `upsertStableQuestion`, `appendKnowledgeVersion`, `replaceKnowledgePrerequisites`, `appendQuestionVersion`, and `replaceQuestionKnowledgeLinks`, all accepting the transaction passed by `ContentService`.
 - Produces: `ImportResult = { createdKnowledge: number; createdQuestions: number; newVersions: number; unchanged: number }`.
 - Consumes: database version and source tables from Task 2.
+
+Task 3 creates `content_bundle_versions(bundle_id, version, payload_hash, imported_at)` with a unique `(bundle_id, version)` key and a unique source-label index. Reimporting the same bundle/version/payload is idempotent; the same version with a different payload and any version lower than the latest must be rejected. The production seed command requires `DATABASE_URL`; service/repository integration tests may use the plan-approved PGlite fallback with the same committed migrations.
 
 - [ ] **Step 1: Write the failing bundle-validation tests**
 
@@ -465,7 +471,7 @@ Expected: FAIL because `ContentBundleSchema` does not exist.
 - [ ] **Step 3: Implement strict Zod contracts and a referential-integrity preflight**
 
 ```ts
-export const ContentBundleSchema = z.object({
+export const ContentBundleSchema = z.strictObject({
   bundleId: z.string().min(1),
   version: z.number().int().positive(),
   knowledgePoints: z.array(KnowledgePointInputSchema).min(1),
@@ -480,7 +486,9 @@ export const ContentBundleSchema = z.object({
 });
 ```
 
-The importer must execute in one transaction, create stable entities by `canonicalId` or `externalKey`, append a version only when versioned fields changed, and reject version regression. Task 6 supplies a transaction and appends `content.bundle.imported` in that same transaction; Task 3 must not write an audit event directly.
+The schema must also reject duplicate knowledge `canonicalId` values, duplicate question `externalKey` values, unknown prerequisite canonical IDs, duplicate IDs inside prerequisite/knowledge-link arrays, and unknown question knowledge IDs.
+
+The importer must execute in one transaction, create stable entities by `canonicalId` or `externalKey`, upsert source records, replace prerequisite and question-knowledge links inside that transaction, append a version only when versioned fields or links changed, and reject version regression or same-version payload mutation. Imported versions start as `draft`; Task 6 performs audited publication. Task 6 supplies a transaction and appends `content.bundle.imported` in that same transaction; Task 3 must not write an audit event directly.
 
 - [ ] **Step 4: Write the failing idempotency and replacement tests**
 
