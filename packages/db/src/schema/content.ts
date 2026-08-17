@@ -52,6 +52,7 @@ export const questions = pgTable("questions", {
   externalKey: text("external_key").notNull().unique()
 });
 
+// Published integrity is enforced by migration triggers and SQL-level tests; Drizzle cannot declare triggers.
 export const questionVersions = pgTable("question_versions", {
   id: uuid("id").defaultRandom().primaryKey(),
   questionId: uuid("question_id").notNull().references(() => questions.id, { onDelete: "cascade" }),
@@ -69,6 +70,7 @@ export const questionVersions = pgTable("question_versions", {
   check("question_versions_difficulty_check", sql`${table.difficulty} between 1 and 5`)
 ]);
 
+// Keep this stable-question link explicit so the trigger can protect published content on deletion or reassignment.
 export const questionKnowledgePoints = pgTable("question_knowledge_points", {
   questionId: uuid("question_id").notNull().references(() => questions.id, { onDelete: "cascade" }),
   knowledgePointId: uuid("knowledge_point_id").notNull().references(() => knowledgePoints.id, { onDelete: "restrict" })

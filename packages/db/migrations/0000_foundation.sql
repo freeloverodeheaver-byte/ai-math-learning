@@ -156,6 +156,34 @@ AFTER INSERT OR UPDATE OF question_id, source_id, review_state ON question_versi
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION enforce_published_question_version();
 
+CREATE FUNCTION enforce_published_question_link() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  stable_question_id uuid;
+BEGIN
+  stable_question_id := OLD.question_id;
+
+  IF EXISTS (
+    SELECT 1 FROM question_versions
+    WHERE question_id = stable_question_id AND review_state = 'published'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM question_knowledge_points WHERE question_id = stable_question_id
+  ) THEN
+    RAISE EXCEPTION 'published question versions require a knowledge-point link';
+  END IF;
+
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER question_knowledge_points_published_integrity
+AFTER DELETE OR UPDATE OF question_id ON question_knowledge_points
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION enforce_published_question_link();
+
 CREATE TABLE audit_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   actor_user_id uuid REFERENCES users(id) ON DELETE RESTRICT,

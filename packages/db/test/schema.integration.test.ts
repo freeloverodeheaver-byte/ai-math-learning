@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/pglite";
+import { and, eq } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
@@ -145,6 +146,77 @@ describe("foundation schema", () => {
       });
       await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: point.id });
     });
+  });
+
+  it("rejects deleting the final knowledge-point link from a published question", async () => {
+    const [question] = await db.insert(questions).values({ externalKey: `final-link-${randomUUID()}` }).returning();
+    const [source] = await db.insert(sources).values({ label: "Source" }).returning();
+    const [point] = await db.insert(knowledgePoints).values({
+      canonicalId: `final-link-point-${randomUUID()}`,
+      name: "Final link point",
+      grade: 7,
+      semester: 1
+    }).returning();
+
+    await db.transaction(async (tx) => {
+      await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: point.id });
+      await tx.insert(questionVersions).values({
+        questionId: question.id,
+        version: 1,
+        stem: "Published with one link",
+        answer: "Yes",
+        explanation: "Removing the last link must fail.",
+        sourceId: source.id,
+        reviewState: "published"
+      });
+    });
+
+    await expect(
+      db.transaction((tx) => tx.delete(questionKnowledgePoints).where(and(
+        eq(questionKnowledgePoints.questionId, question.id),
+        eq(questionKnowledgePoints.knowledgePointId, point.id)
+      )))
+    ).rejects.toThrow();
+  });
+
+  it("allows replacing a published question knowledge-point link in one transaction", async () => {
+    const [question] = await db.insert(questions).values({ externalKey: `replace-link-${randomUUID()}` }).returning();
+    const [source] = await db.insert(sources).values({ label: "Source" }).returning();
+    const [firstPoint] = await db.insert(knowledgePoints).values({
+      canonicalId: `replace-first-${randomUUID()}`,
+      name: "First point",
+      grade: 7,
+      semester: 1
+    }).returning();
+    const [secondPoint] = await db.insert(knowledgePoints).values({
+      canonicalId: `replace-second-${randomUUID()}`,
+      name: "Second point",
+      grade: 7,
+      semester: 1
+    }).returning();
+
+    await db.transaction(async (tx) => {
+      await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: firstPoint.id });
+      await tx.insert(questionVersions).values({
+        questionId: question.id,
+        version: 1,
+        stem: "Published before replacement",
+        answer: "Yes",
+        explanation: "Replacing links in one transaction is valid.",
+        sourceId: source.id,
+        reviewState: "published"
+      });
+    });
+
+    await expect(
+      db.transaction(async (tx) => {
+        await tx.delete(questionKnowledgePoints).where(and(
+          eq(questionKnowledgePoints.questionId, question.id),
+          eq(questionKnowledgePoints.knowledgePointId, firstPoint.id)
+        ));
+        await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: secondPoint.id });
+      })
+    ).resolves.toBeUndefined();
   });
 
   it("declares the named anti-self prerequisite check", () => {

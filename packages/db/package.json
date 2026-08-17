@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "migrate": "tsx src/migrate.ts",
     "test:native-migration": "node dist/test/native-migration-smoke.js",
-    "test": "vitest run --exclude dist/**"
+    "test": "pnpm run build && vitest run --exclude dist/**"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
