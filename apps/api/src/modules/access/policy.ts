@@ -34,11 +34,17 @@ export async function decideStudentRead(
     return { allowed: true, reason: "self" };
   }
 
-  if (await repository.hasActiveGuardianLink(actor.userId, studentProfileId)) {
+  if (
+    actor.roles.includes("guardian") &&
+    await repository.hasActiveGuardianLink(actor.userId, studentProfileId)
+  ) {
     return { allowed: true, reason: "guardian_link" };
   }
 
-  if (await repository.hasActiveClassGrant(actor.userId, studentProfileId, scope)) {
+  if (
+    actor.roles.includes("teacher") &&
+    await repository.hasActiveClassGrant(actor.userId, studentProfileId, scope)
+  ) {
     return { allowed: true, reason: "class_grant" };
   }
 

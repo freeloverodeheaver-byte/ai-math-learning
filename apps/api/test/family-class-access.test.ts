@@ -20,8 +20,18 @@ import Fastify from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { DevIdentityProvider } from "../src/modules/identity/dev-identity-provider.js";
-import { decideStudentRead, type AccessDecisionRepository } from "../src/modules/access/policy.js";
-import { AccessRepository } from "../src/modules/access/repository.js";
+import {
+  decideStudentRead,
+  type AccessDecisionRepository,
+  type SharingScope,
+} from "../src/modules/access/policy.js";
+import {
+  AccessRepository,
+  type AccessTransaction,
+  type ClassCreatedAuditMetadata,
+  type ClassMembership,
+  type StudentCreatedAuditMetadata,
+} from "../src/modules/access/repository.js";
 import { registerAccessRoutes } from "../src/modules/access/routes.js";
 import { AccessService } from "../src/modules/access/service.js";
 import { registerActorPlugin } from "../src/plugins/actor.js";
@@ -56,8 +66,10 @@ describe("student read policy", () => {
   it.each([
     ["student self", actors.student, studentId, "learning_summary", true, "self"],
     ["active guardian", actors.linkedGuardian, studentId, "learning_summary", true, "guardian_link"],
+    ["guardian link without guardian role", { userId: actors.linkedGuardian.userId, roles: [] }, studentId, "learning_summary", false, "not_authorized"],
     ["revoked guardian", actors.revokedGuardian, studentId, "learning_summary", false, "not_authorized"],
     ["approved teacher exact scope", actors.approvedTeacher, studentId, "learning_summary", true, "class_grant"],
+    ["class grant without teacher role", { userId: actors.approvedTeacher.userId, roles: ["guardian"] }, studentId, "learning_summary", false, "not_authorized"],
     ["approved teacher wrong scope", actors.approvedTeacher, studentId, "shared_personal_content", false, "not_authorized"],
     ["teacher with revoked grant", actors.revokedGrantTeacher, studentId, "learning_summary", false, "not_authorized"],
     ["teacher with inactive membership", actors.inactiveMembershipTeacher, studentId, "learning_summary", false, "not_authorized"],
@@ -180,7 +192,7 @@ describe("family and class setup service", () => {
       displayName: "Duplicate",
       grade: 8,
       semester: 2,
-    })).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" });
+    })).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT", message: "CONFLICT" });
 
     const [matchingUsers] = await integrationDb
       .select({ value: count() })
@@ -266,10 +278,11 @@ describe("family and class setup service", () => {
     expect(selfRequest.state).toBe("requested");
 
     const [audit] = await integrationDb
-      .select({ actorUserId: auditEvents.actorUserId, metadata: auditEvents.metadata })
+      .select({ action: auditEvents.action, actorUserId: auditEvents.actorUserId, metadata: auditEvents.metadata })
       .from(auditEvents)
       .where(eq(auditEvents.subjectId, guardianRequest.id));
     expect(audit).toEqual({
+      action: "class.membership.requested",
       actorUserId: guardian.userId,
       metadata: {
         membershipId: guardianRequest.id,
@@ -286,6 +299,174 @@ describe("family and class setup service", () => {
       student.id,
     )).rejects.toMatchObject({ statusCode: 409, code: "CONFLICT" });
   });
+
+  it("does not translate an unrelated nested unique violation as a student conflict", async () => {
+    const guardian = await seedActor(["guardian"]);
+    const unrelatedUnique = Object.assign(new Error("unrelated unique"), {
+      cause: { code: "23505", constraint: "user_roles_user_role_unique" },
+    });
+    class UnrelatedUniqueRepository extends AccessRepository {
+      override async createStudentForGuardian(
+        ..._args: Parameters<AccessRepository["createStudentForGuardian"]>
+      ): Promise<never> {
+        throw unrelatedUnique;
+      }
+    }
+    const service = new AccessService(integrationDb, new UnrelatedUniqueRepository(integrationDb));
+
+    await expect(service.createStudentForGuardian(guardian, {
+      studentExternalSubject: `unrelated-unique-${randomUUID()}`,
+      displayName: "Unrelated unique",
+      grade: 7,
+      semester: 1,
+    })).rejects.toBe(unrelatedUnique);
+  });
+
+  it("does not translate an unrelated nested unique violation as an open-membership conflict", async () => {
+    const guardian = await seedActor(["guardian"]);
+    const teacher = await seedActor(["teacher"], { teacherProfile: true });
+    const student = await integrationService.createStudentForGuardian(guardian, {
+      studentExternalSubject: `request-unique-${randomUUID()}`,
+      displayName: "Request unique",
+      grade: 7,
+      semester: 1,
+    });
+    const createdClass = await integrationService.createClass(teacher, {
+      name: "Request unique class",
+      subject: "math",
+    });
+    const unrelatedUnique = Object.assign(new Error("unrelated request unique"), {
+      cause: { code: "23505", constraint: "audit_events_unrelated_unique" },
+    });
+    class UnrelatedUniqueRepository extends AccessRepository {
+      override async appendMembershipAudit(
+        ..._args: Parameters<AccessRepository["appendMembershipAudit"]>
+      ): Promise<void> {
+        throw unrelatedUnique;
+      }
+    }
+    const service = new AccessService(integrationDb, new UnrelatedUniqueRepository(integrationDb));
+
+    await expect(service.requestClassMembership(
+      guardian,
+      createdClass.inviteCode,
+      student.id,
+    )).rejects.toBe(unrelatedUnique);
+  });
+});
+
+describe("permission-bearing creation audits", () => {
+  it("audits student and guardian relationship creation without the external subject", async () => {
+    const guardian = await seedActor(["guardian"]);
+    const externalSubject = `audited-child-${randomUUID()}`;
+
+    const student = await integrationService.createStudentForGuardian(guardian, {
+      studentExternalSubject: externalSubject,
+      displayName: "Audited child",
+      grade: 8,
+      semester: 2,
+    });
+
+    const [audit] = await integrationDb
+      .select({ action: auditEvents.action, actorUserId: auditEvents.actorUserId, metadata: auditEvents.metadata })
+      .from(auditEvents)
+      .where(and(
+        eq(auditEvents.subjectType, "student_profile"),
+        eq(auditEvents.subjectId, student.id),
+      ));
+    expect(audit).toEqual({
+      action: "student.created",
+      actorUserId: guardian.userId,
+      metadata: {
+        studentProfileId: student.id,
+        studentUserId: student.userId,
+        guardianUserId: guardian.userId,
+        guardianLinkId: expect.any(String),
+      },
+    });
+    expect(JSON.stringify(audit?.metadata)).not.toContain(externalSubject);
+  });
+
+  it("audits class creation without persisting the invite code in audit metadata", async () => {
+    const teacher = await seedActor(["teacher"], { teacherProfile: true });
+    const createdClass = await integrationService.createClass(teacher, {
+      name: "Audited class",
+      subject: "math",
+    });
+
+    const [audit] = await integrationDb
+      .select({ action: auditEvents.action, actorUserId: auditEvents.actorUserId, metadata: auditEvents.metadata })
+      .from(auditEvents)
+      .where(and(
+        eq(auditEvents.subjectType, "class"),
+        eq(auditEvents.subjectId, createdClass.id),
+      ));
+    expect(audit).toEqual({
+      action: "class.created",
+      actorUserId: teacher.userId,
+      metadata: {
+        classId: createdClass.id,
+        teacherProfileId: createdClass.teacherProfileId,
+        teacherUserId: teacher.userId,
+        subject: "math",
+      },
+    });
+    expect(audit?.metadata).not.toHaveProperty("inviteCode");
+  });
+
+  it.each(["student", "class"] as const)(
+    "rolls %s creation back when its audit append fails",
+    async (target) => {
+      class FailingCreationAuditRepository extends AccessRepository {
+        override async appendStudentCreatedAudit(
+          _transaction: AccessTransaction,
+          _actorUserId: string,
+          _metadata: StudentCreatedAuditMetadata,
+        ): Promise<void> {
+          if (target === "student") throw new Error("forced student creation audit failure");
+        }
+
+        override async appendClassCreatedAudit(
+          _transaction: AccessTransaction,
+          _actorUserId: string,
+          _metadata: ClassCreatedAuditMetadata,
+        ): Promise<void> {
+          if (target === "class") throw new Error("forced class creation audit failure");
+        }
+      }
+      const service = new AccessService(
+        integrationDb,
+        new FailingCreationAuditRepository(integrationDb),
+        () => `audit-failure-${randomUUID()}`,
+      );
+
+      if (target === "student") {
+        const guardian = await seedActor(["guardian"]);
+        const externalSubject = `rollback-child-${randomUUID()}`;
+        await expect(service.createStudentForGuardian(guardian, {
+          studentExternalSubject: externalSubject,
+          displayName: "Rollback child",
+          grade: 7,
+          semester: 1,
+        })).rejects.toThrow("forced student creation audit failure");
+        const rows = await integrationDb
+          .select({ id: users.id })
+          .from(users)
+          .where(eq(users.externalSubject, externalSubject));
+        expect(rows).toEqual([]);
+      } else {
+        const teacher = await seedActor(["teacher"], { teacherProfile: true });
+        const name = `Rollback class ${randomUUID()}`;
+        await expect(service.createClass(teacher, { name, subject: "math" }))
+          .rejects.toThrow("forced class creation audit failure");
+        const rows = await integrationDb
+          .select({ id: classes.id })
+          .from(classes)
+          .where(eq(classes.name, name));
+        expect(rows).toEqual([]);
+      }
+    },
+  );
 });
 
 describe("guardian-approved membership transitions", () => {
@@ -315,6 +496,8 @@ describe("guardian-approved membership transitions", () => {
       scenario.guardian,
       scenario.membership.id,
     );
+    const exactScope: SharingScope = grant.scope;
+    expect(exactScope).toBe("learning_summary");
     expect(grant).toMatchObject({
       classMembershipId: scenario.membership.id,
       studentProfileId: scenario.student.id,
@@ -347,11 +530,12 @@ describe("guardian-approved membership transitions", () => {
     expect(grants).toEqual([{ scope: "learning_summary" }]);
 
     const audits = await integrationDb
-      .select({ actorUserId: auditEvents.actorUserId, metadata: auditEvents.metadata })
+      .select({ action: auditEvents.action, actorUserId: auditEvents.actorUserId, metadata: auditEvents.metadata })
       .from(auditEvents)
       .where(eq(auditEvents.subjectId, scenario.membership.id));
     expect(audits).toEqual(expect.arrayContaining([
       {
+        action: "class.membership.requested",
         actorUserId: scenario.guardian.userId,
         metadata: {
           membershipId: scenario.membership.id,
@@ -362,6 +546,7 @@ describe("guardian-approved membership transitions", () => {
         },
       },
       {
+        action: "class.membership.approved",
         actorUserId: scenario.guardian.userId,
         metadata: {
           membershipId: scenario.membership.id,
@@ -401,7 +586,7 @@ describe("guardian-approved membership transitions", () => {
       .from(auditEvents)
       .where(and(
         eq(auditEvents.subjectId, scenario.membership.id),
-        eq(auditEvents.action, "class_membership.rejected"),
+        eq(auditEvents.action, "class.membership.rejected"),
       ));
     expect(audit).toEqual({
       actorUserId: scenario.guardian.userId,
@@ -450,7 +635,7 @@ describe("guardian-approved membership transitions", () => {
       .from(auditEvents)
       .where(and(
         eq(auditEvents.subjectId, scenario.membership.id),
-        eq(auditEvents.action, "class_membership.revoked"),
+        eq(auditEvents.action, "class.membership.revoked"),
       ));
     expect(audit).toEqual({
       actorUserId: scenario.guardian.userId,
@@ -529,6 +714,108 @@ describe("guardian-approved membership transitions", () => {
   );
 });
 
+describe("guardian relationship lock ordering", () => {
+  class RecordingLockRepository extends AccessRepository {
+    readonly events: string[] = [];
+
+    override async findMembershipForTransition(
+      transaction: AccessTransaction,
+      membershipId: string,
+    ): Promise<ClassMembership | undefined> {
+      this.events.push("membership-preview");
+      return super.findMembershipForTransition(transaction, membershipId);
+    }
+
+    override async lockActiveGuardianLink(
+      transaction: AccessTransaction,
+      guardianUserId: string,
+      studentProfileId: string,
+    ): Promise<boolean> {
+      this.events.push("guardian-link-for-update");
+      return super.lockActiveGuardianLink(transaction, guardianUserId, studentProfileId);
+    }
+
+    override async lockMembership(
+      transaction: AccessTransaction,
+      membershipId: string,
+    ): Promise<ClassMembership | undefined> {
+      this.events.push("membership-for-update");
+      return super.lockMembership(transaction, membershipId);
+    }
+
+    override async hasActiveGuardianLinkIn(
+      transaction: AccessTransaction,
+      actorUserId: string,
+      studentProfileId: string,
+    ): Promise<boolean> {
+      this.events.push("guardian-link-unlocked");
+      return super.hasActiveGuardianLinkIn(transaction, actorUserId, studentProfileId);
+    }
+  }
+
+  it("locks guardian link before membership during a guardian transition", async () => {
+    const scenario = await createRequestedMembership();
+    const recordingRepository = new RecordingLockRepository(integrationDb);
+    const service = new AccessService(integrationDb, recordingRepository);
+
+    await expect(service.rejectClassMembership(
+      scenario.guardian,
+      scenario.membership.id,
+    )).resolves.toMatchObject({ state: "rejected" });
+    expect(recordingRepository.events).toEqual([
+      "membership-preview",
+      "guardian-link-for-update",
+      "membership-for-update",
+    ]);
+  });
+
+  it("locks the active guardian link before creating a membership request", async () => {
+    const guardian = await seedActor(["guardian"]);
+    const teacher = await seedActor(["teacher"], { teacherProfile: true });
+    const student = await integrationService.createStudentForGuardian(guardian, {
+      studentExternalSubject: `lock-request-${randomUUID()}`,
+      displayName: "Lock request",
+      grade: 7,
+      semester: 1,
+    });
+    const createdClass = await integrationService.createClass(teacher, {
+      name: "Lock request class",
+      subject: "math",
+    });
+    const recordingRepository = new RecordingLockRepository(integrationDb);
+    const service = new AccessService(integrationDb, recordingRepository);
+
+    await expect(service.requestClassMembership(
+      guardian,
+      createdClass.inviteCode,
+      student.id,
+    )).resolves.toMatchObject({ state: "requested" });
+    expect(recordingRepository.events).toEqual(["guardian-link-for-update"]);
+  });
+
+  it("returns the same 403 when the membership changes between preview and final lock", async () => {
+    const scenario = await createRequestedMembership();
+    class ChangedMembershipRepository extends AccessRepository {
+      override async lockMembership(
+        transaction: AccessTransaction,
+        membershipId: string,
+      ): Promise<ClassMembership | undefined> {
+        const membership = await super.lockMembership(transaction, membershipId);
+        return membership === undefined ? undefined : { ...membership, state: "active" };
+      }
+    }
+    const service = new AccessService(
+      integrationDb,
+      new ChangedMembershipRepository(integrationDb),
+    );
+
+    await expect(service.approveClassMembership(
+      scenario.guardian,
+      scenario.membership.id,
+    )).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
+  });
+});
+
 function actorHeaders(actor: Actor): Record<string, string> {
   return {
     "x-dev-user-id": actor.userId,
@@ -574,6 +861,26 @@ describe("access HTTP routes", () => {
       await app.close();
     }
   });
+
+  it.each(["approve", "reject", "revoke"] as const)(
+    "rejects a non-empty %s transition body",
+    async (transition) => {
+      const app = await buildAccessRouteApp();
+      const guardian = await seedActor(["guardian"]);
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: `/access/class-memberships/${randomUUID()}/${transition}`,
+          headers: actorHeaders(guardian),
+          payload: { unexpected: true },
+        });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toMatchObject({ code: "BAD_REQUEST" });
+      } finally {
+        await app.close();
+      }
+    },
+  );
 
   it("enforces strict inputs and completes guardian-approved sharing without target disclosure", async () => {
     const app = await buildAccessRouteApp();

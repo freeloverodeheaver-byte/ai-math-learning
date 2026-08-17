@@ -29,10 +29,15 @@ function defaultInviteCodeGenerator(): string {
   return randomBytes(16).toString("base64url");
 }
 
-function isUniqueViolation(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  if ("code" in error && error.code === "23505") return true;
-  return "cause" in error && isUniqueViolation(error.cause);
+function uniqueViolationConstraint(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  if (
+    "code" in error && error.code === "23505" &&
+    "constraint" in error && typeof error.constraint === "string"
+  ) {
+    return error.constraint;
+  }
+  return "cause" in error ? uniqueViolationConstraint(error.cause) : undefined;
 }
 
 export class AccessService {
@@ -48,10 +53,24 @@ export class AccessService {
   ): Promise<StudentProfile> {
     requireRole(actor, ["guardian"]);
     try {
-      return await this.database.transaction((transaction) =>
-        this.repository.createStudentForGuardian(transaction, actor.userId, input));
+      return await this.database.transaction(async (transaction) => {
+        const created = await this.repository.createStudentForGuardian(
+          transaction,
+          actor.userId,
+          input,
+        );
+        await this.repository.appendStudentCreatedAudit(transaction, actor.userId, {
+          studentProfileId: created.profile.id,
+          studentUserId: created.profile.userId,
+          guardianUserId: actor.userId,
+          guardianLinkId: created.guardianLinkId,
+        });
+        return created.profile;
+      });
     } catch (error) {
-      if (isUniqueViolation(error)) throw new ConflictError("STUDENT_EXTERNAL_SUBJECT_EXISTS");
+      if (uniqueViolationConstraint(error) === "users_external_subject_key") {
+        throw new ConflictError();
+      }
       throw error;
     }
   }
@@ -61,12 +80,19 @@ export class AccessService {
     return this.database.transaction(async (transaction) => {
       const teacherProfileId = await this.repository.findTeacherProfileId(transaction, actor.userId);
       if (teacherProfileId === undefined) throw new ForbiddenError();
-      return this.repository.createClass(
+      const createdClass = await this.repository.createClass(
         transaction,
         teacherProfileId,
         input,
         this.inviteCodeGenerator(),
       );
+      await this.repository.appendClassCreatedAudit(transaction, actor.userId, {
+        classId: createdClass.id,
+        teacherProfileId,
+        teacherUserId: actor.userId,
+        subject: "math",
+      });
+      return createdClass;
     });
   }
 
@@ -98,7 +124,9 @@ export class AccessService {
         return membership;
       });
     } catch (error) {
-      if (isUniqueViolation(error)) throw new ConflictError("OPEN_MEMBERSHIP_EXISTS");
+      if (uniqueViolationConstraint(error) === "class_memberships_open_unique") {
+        throw new ConflictError();
+      }
       throw error;
     }
   }
@@ -196,13 +224,22 @@ export class AccessService {
     actor: Actor,
     membershipId: string,
   ): Promise<ClassMembership> {
-    const membership = await this.repository.lockMembership(transaction, membershipId);
-    if (membership === undefined) throw new ForbiddenError();
-    if (!await this.repository.hasActiveGuardianLinkIn(
+    const preview = await this.repository.findMembershipForTransition(transaction, membershipId);
+    if (preview === undefined) throw new ForbiddenError();
+    if (!await this.repository.lockActiveGuardianLink(
       transaction,
       actor.userId,
-      membership.studentProfileId,
+      preview.studentProfileId,
     )) {
+      throw new ForbiddenError();
+    }
+    const membership = await this.repository.lockMembership(transaction, membershipId);
+    if (
+      membership === undefined ||
+      membership.id !== preview.id ||
+      membership.studentProfileId !== preview.studentProfileId ||
+      membership.state !== preview.state
+    ) {
       throw new ForbiddenError();
     }
     return membership;
@@ -229,7 +266,7 @@ export class AccessService {
       return true;
     }
     return actor.roles.includes("guardian") &&
-      await this.repository.hasActiveGuardianLinkIn(transaction, actor.userId, studentProfileId);
+      await this.repository.lockActiveGuardianLink(transaction, actor.userId, studentProfileId);
   }
 }
 

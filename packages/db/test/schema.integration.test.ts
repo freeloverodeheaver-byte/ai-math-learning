@@ -493,6 +493,85 @@ describe("access migration invariants", () => {
     )).rejects.toThrow();
   });
 
+  it("prevents rebinding an approved membership to another class", async () => {
+    const fixture = await createAccessFixture();
+    const membershipId = randomUUID();
+    const otherClassId = randomUUID();
+    await pglite.query(
+      `insert into classes (id, teacher_profile_id, name, subject, invite_code)
+       select $1, teacher_profile_id, 'Other class', 'math', $2 from classes where id = $3`,
+      [otherClassId, `invite-${otherClassId}`, fixture.classId],
+    );
+    await pglite.transaction(async (tx) => {
+      await tx.query(
+        "insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values ($1, $2, $3, 'active', now())",
+        [membershipId, fixture.classId, fixture.studentProfileId],
+      );
+      await tx.query(
+        "insert into data_sharing_grants (class_membership_id, student_profile_id, scope) values ($1, $2, 'learning_summary')",
+        [membershipId, fixture.studentProfileId],
+      );
+    });
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query("update class_memberships set class_id = $1 where id = $2", [otherClassId, membershipId]);
+    })).rejects.toThrow(/active grant/i);
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query(
+        "update data_sharing_grants set revoked_at = now() where class_membership_id = $1",
+        [membershipId],
+      );
+      await tx.query(
+        "update class_memberships set class_id = $1, student_profile_id = $2 where id = $3",
+        [otherClassId, fixture.otherStudentProfileId, membershipId],
+      );
+    })).resolves.toBeUndefined();
+  });
+
+  it("prevents transferring an approved class to another teacher until grants are revoked", async () => {
+    const fixture = await createAccessFixture();
+    const membershipId = randomUUID();
+    const otherTeacherUserId = randomUUID();
+    const otherTeacherProfileId = randomUUID();
+    await pglite.query(
+      "insert into users (id, external_subject) values ($1, $2)",
+      [otherTeacherUserId, `teacher-${otherTeacherUserId}`],
+    );
+    await pglite.query(
+      "insert into teacher_profiles (id, user_id, display_name) values ($1, $2, 'Other teacher')",
+      [otherTeacherProfileId, otherTeacherUserId],
+    );
+    await pglite.transaction(async (tx) => {
+      await tx.query(
+        "insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values ($1, $2, $3, 'active', now())",
+        [membershipId, fixture.classId, fixture.studentProfileId],
+      );
+      await tx.query(
+        "insert into data_sharing_grants (class_membership_id, student_profile_id, scope) values ($1, $2, 'learning_summary')",
+        [membershipId, fixture.studentProfileId],
+      );
+    });
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query(
+        "update classes set teacher_profile_id = $1 where id = $2",
+        [otherTeacherProfileId, fixture.classId],
+      );
+    })).rejects.toThrow(/active grant/i);
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query(
+        "update data_sharing_grants set revoked_at = now() where class_membership_id = $1",
+        [membershipId],
+      );
+      await tx.query(
+        "update classes set teacher_profile_id = $1 where id = $2",
+        [otherTeacherProfileId, fixture.classId],
+      );
+    })).resolves.toBeUndefined();
+  });
+
   it("migrates legacy duplicate open memberships deterministically and audits each rejection", async () => {
     const legacy = await PGlite.create({ extensions: { pgcrypto } });
     try {
@@ -506,6 +585,9 @@ describe("access migration invariants", () => {
       const rejectedId = randomUUID();
       const earliestOpenId = randomUUID();
       const laterOpenId = randomUUID();
+      const unknownScopeGrantId = randomUUID();
+      const inactiveMembershipGrantId = randomUUID();
+      const mismatchedStudentGrantId = randomUUID();
 
       await legacy.query(
         `insert into class_memberships
@@ -526,6 +608,23 @@ describe("access migration invariants", () => {
           fixture.otherStudentProfileId,
           earliestOpenId,
           laterOpenId,
+        ],
+      );
+
+      await legacy.query(
+        `insert into data_sharing_grants
+          (id, class_membership_id, student_profile_id, scope) values
+          ($1, $2, $3, 'legacy_unknown_scope'),
+          ($4, $5, $3, 'learning_summary'),
+          ($6, $2, $7, 'shared_personal_content')`,
+        [
+          unknownScopeGrantId,
+          activeId,
+          fixture.studentProfileId,
+          inactiveMembershipGrantId,
+          firstRequestedId,
+          mismatchedStudentGrantId,
+          fixture.otherStudentProfileId,
         ],
       );
 
@@ -562,6 +661,28 @@ describe("access migration invariants", () => {
       expect(audits.rows.every((row) =>
         row.metadata.oldState === "requested" && row.metadata.newState === "rejected"
       )).toBe(true);
+
+      const repairedGrants = await legacy.query<{ id: string; scope: string; revoked_at: Date | null }>(
+        "select id, scope, revoked_at from data_sharing_grants where id = any($1::uuid[]) order by id",
+        [[unknownScopeGrantId, inactiveMembershipGrantId, mismatchedStudentGrantId]],
+      );
+      expect(repairedGrants.rows).toHaveLength(3);
+      expect(repairedGrants.rows.every((row) => row.revoked_at instanceof Date)).toBe(true);
+      expect(new Set(repairedGrants.rows.map((row) => row.scope))).toEqual(new Set([
+        "legacy_unknown_scope",
+        "learning_summary",
+        "shared_personal_content",
+      ]));
+
+      const grantAudits = await legacy.query<{ subject_id: string; metadata: Record<string, unknown> }>(
+        `select subject_id, metadata from audit_events
+         where action = 'data_sharing_grant.migration_revoked_invalid'
+         order by subject_id`,
+      );
+      expect(grantAudits.rows).toHaveLength(3);
+      expect(grantAudits.rows.map((row) => row.subject_id)).toEqual(
+        [unknownScopeGrantId, inactiveMembershipGrantId, mismatchedStudentGrantId].sort(),
+      );
     } finally {
       await legacy.close();
     }

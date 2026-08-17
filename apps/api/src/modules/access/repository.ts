@@ -36,6 +36,25 @@ export interface StudentProfile {
   createdAt: Date;
 }
 
+export interface StudentCreatedAuditMetadata {
+  studentProfileId: string;
+  studentUserId: string;
+  guardianUserId: string;
+  guardianLinkId: string;
+}
+
+export interface ClassCreatedAuditMetadata {
+  classId: string;
+  teacherProfileId: string;
+  teacherUserId: string;
+  subject: "math";
+}
+
+interface CreatedStudentSetup {
+  profile: StudentProfile;
+  guardianLinkId: string;
+}
+
 export interface Class {
   id: string;
   teacherProfileId: string;
@@ -60,7 +79,7 @@ export interface DataSharingGrant {
   id: string;
   classMembershipId: string;
   studentProfileId: string;
-  scope: string;
+  scope: SharingScope;
   grantedAt: Date;
   revokedAt: Date | null;
 }
@@ -156,6 +175,26 @@ export class AccessRepository implements AccessDecisionRepository {
     return row !== undefined;
   }
 
+  async lockActiveGuardianLink(
+    transaction: AccessTransaction,
+    guardianUserId: string,
+    studentProfileId: string,
+  ): Promise<boolean> {
+    // Durable lock order for guardian-authorized writes is guardian_links first,
+    // then class_memberships. A future guardian-link revoke must acquire this
+    // same link row before touching memberships or grants.
+    const [row] = await transaction
+      .select({ id: guardianLinks.id })
+      .from(guardianLinks)
+      .where(and(
+        eq(guardianLinks.guardianUserId, guardianUserId),
+        eq(guardianLinks.studentProfileId, studentProfileId),
+        isNull(guardianLinks.revokedAt),
+      ))
+      .for("update");
+    return row !== undefined;
+  }
+
   async hasActiveClassGrant(
     actorUserId: string,
     studentProfileId: string,
@@ -188,7 +227,7 @@ export class AccessRepository implements AccessDecisionRepository {
     transaction: AccessTransaction,
     guardianUserId: string,
     input: CreateStudentInput,
-  ): Promise<StudentProfile> {
+  ): Promise<CreatedStudentSetup> {
     const [studentUser] = await transaction
       .insert(users)
       .values({ externalSubject: input.studentExternalSubject })
@@ -203,11 +242,14 @@ export class AccessRepository implements AccessDecisionRepository {
         semester: input.semester,
       })
       .returning(studentSelection);
-    await transaction.insert(guardianLinks).values({
-      guardianUserId,
-      studentProfileId: profile!.id,
-    });
-    return profile!;
+    const [guardianLink] = await transaction
+      .insert(guardianLinks)
+      .values({
+        guardianUserId,
+        studentProfileId: profile!.id,
+      })
+      .returning({ id: guardianLinks.id });
+    return { profile: profile!, guardianLinkId: guardianLink!.id };
   }
 
   async findTeacherProfileId(
@@ -233,6 +275,34 @@ export class AccessRepository implements AccessDecisionRepository {
       .values({ teacherProfileId, ...input, inviteCode })
       .returning(classSelection);
     return createdClass!;
+  }
+
+  async appendStudentCreatedAudit(
+    transaction: AccessTransaction,
+    actorUserId: string,
+    metadata: StudentCreatedAuditMetadata,
+  ): Promise<void> {
+    await transaction.insert(auditEvents).values({
+      actorUserId,
+      action: "student.created",
+      subjectType: "student_profile",
+      subjectId: metadata.studentProfileId,
+      metadata: { ...metadata },
+    });
+  }
+
+  async appendClassCreatedAudit(
+    transaction: AccessTransaction,
+    actorUserId: string,
+    metadata: ClassCreatedAuditMetadata,
+  ): Promise<void> {
+    await transaction.insert(auditEvents).values({
+      actorUserId,
+      action: "class.created",
+      subjectType: "class",
+      subjectId: metadata.classId,
+      metadata: { ...metadata },
+    });
   }
 
   async findClassIdByInvite(
@@ -271,6 +341,18 @@ export class AccessRepository implements AccessDecisionRepository {
     return membership;
   }
 
+  async findMembershipForTransition(
+    transaction: AccessTransaction,
+    membershipId: string,
+  ): Promise<ClassMembership | undefined> {
+    const [membership] = await transaction
+      .select(membershipSelection)
+      .from(classMemberships)
+      .where(eq(classMemberships.id, membershipId))
+      .limit(1);
+    return membership;
+  }
+
   async updateMembershipState(
     transaction: AccessTransaction,
     membershipId: string,
@@ -297,7 +379,13 @@ export class AccessRepository implements AccessDecisionRepository {
         scope: "learning_summary",
       })
       .returning(grantSelection);
-    return grant!;
+    if (
+      grant === undefined ||
+      (grant.scope !== "learning_summary" && grant.scope !== "shared_personal_content")
+    ) {
+      throw new Error("database returned an invalid sharing scope");
+    }
+    return { ...grant, scope: grant.scope };
   }
 
   async revokeActiveGrants(
@@ -336,9 +424,15 @@ export class AccessRepository implements AccessDecisionRepository {
     actorUserId: string,
     metadata: MembershipAuditMetadata,
   ): Promise<void> {
+    const action = {
+      requested: "class.membership.requested",
+      active: "class.membership.approved",
+      rejected: "class.membership.rejected",
+      revoked: "class.membership.revoked",
+    } satisfies Record<MembershipState, string>;
     await transaction.insert(auditEvents).values({
       actorUserId,
-      action: `class_membership.${metadata.newState}`,
+      action: action[metadata.newState],
       subjectType: "class_membership",
       subjectId: metadata.membershipId,
       metadata: { ...metadata },

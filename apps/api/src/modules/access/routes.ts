@@ -23,6 +23,7 @@ const JoinBodySchema = z.strictObject({
 });
 
 const MembershipParamsSchema = z.strictObject({ membershipId: z.uuid() });
+const EmptyTransitionBodySchema = z.union([z.undefined(), z.strictObject({})]);
 const SharingParamsSchema = z.strictObject({
   studentId: z.uuid(),
   scope: z.enum(["learning_summary", "shared_personal_content"]),
@@ -78,18 +79,21 @@ export const registerAccessRoutes: FastifyPluginAsync<AccessRoutesOptions> = asy
   app.post("/access/class-memberships/:membershipId/approve", async (request) => {
     const actor = requireActor(request);
     const { membershipId } = parse(MembershipParamsSchema, request.params);
+    parse(EmptyTransitionBodySchema, request.body);
     return options.service.approveClassMembership(actor, membershipId);
   });
 
   app.post("/access/class-memberships/:membershipId/reject", async (request) => {
     const actor = requireActor(request);
     const { membershipId } = parse(MembershipParamsSchema, request.params);
+    parse(EmptyTransitionBodySchema, request.body);
     return options.service.rejectClassMembership(actor, membershipId);
   });
 
   app.post("/access/class-memberships/:membershipId/revoke", async (request) => {
     const actor = requireActor(request);
     const { membershipId } = parse(MembershipParamsSchema, request.params);
+    parse(EmptyTransitionBodySchema, request.body);
     return options.service.revokeClassMembership(actor, membershipId);
   });
 

@@ -46,6 +46,8 @@ export const teacherProfiles = pgTable("teacher_profiles", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
 });
 
+// Migration 0002 prevents changing class ownership while an active membership
+// still has an unrevoked grant; ownership transfer must revoke grants first.
 export const classes = pgTable("classes", {
   id: uuid("id").defaultRandom().primaryKey(),
   teacherProfileId: uuid("teacher_profile_id").notNull().references(() => teacherProfiles.id, { onDelete: "restrict" }),
@@ -55,6 +57,8 @@ export const classes = pgTable("classes", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull()
 });
 
+// Migration 0002 prevents rebinding class/student identity while an unrevoked
+// grant exists. Grant revocation and any rebinding must share one transaction.
 export const classMemberships = pgTable("class_memberships", {
   id: uuid("id").defaultRandom().primaryKey(),
   classId: uuid("class_id").notNull().references(() => classes.id, { onDelete: "cascade" }),
@@ -88,6 +92,6 @@ export const dataSharingGrants = pgTable("data_sharing_grants", {
   uniqueIndex("data_sharing_grants_active_unique").on(table.classMembershipId, table.scope).where(sql`${table.revokedAt} is null`),
   check(
     "data_sharing_grants_scope_check",
-    sql`${table.scope} in ('learning_summary', 'shared_personal_content')`
+    sql`${table.revokedAt} is not null or ${table.scope} in ('learning_summary', 'shared_personal_content')`
   )
 ]);
