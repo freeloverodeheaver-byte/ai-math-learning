@@ -610,7 +610,12 @@ git commit -m "feat: enforce actor roles through identity adapter"
 ### Task 5: Family, Class, and Student-Sharing Authorization
 
 **Files:**
+- Modify: `packages/db/src/schema/identity.ts`
+- Create: `packages/db/migrations/0002_access_invariants.sql`
+- Modify: `packages/db/migrations/meta/_journal.json`
+- Test: `packages/db/test/schema.integration.test.ts`
 - Create: `apps/api/src/modules/access/policy.ts`
+- Create: `apps/api/src/modules/access/repository.ts`
 - Create: `apps/api/src/modules/access/service.ts`
 - Create: `apps/api/src/modules/access/routes.ts`
 - Test: `apps/api/test/family-class-access.test.ts`
@@ -621,7 +626,11 @@ git commit -m "feat: enforce actor roles through identity adapter"
 - Produces: `createClass(actor, input): Promise<Class>`.
 - Produces: `requestClassMembership(actor, inviteCode, studentId): Promise<ClassMembership>`.
 - Produces: `approveClassMembership(actor, membershipId): Promise<DataSharingGrant>`.
+- Produces: `rejectClassMembership(actor, membershipId)` and `revokeClassMembership(actor, membershipId)` with explicit state-machine validation.
+- Produces: a teacher-owned membership-status read that never activates or grants sharing.
 - Consumes: actor plugin from Task 4 and identity tables from Task 2.
+
+Task 5 adds a partial unique index for one open (`requested` or `active`) membership per class/student pair. Approval locks the membership row, changes `requested -> active`, and creates only a `learning_summary` grant in the same transaction; personal content remains unshared by default. Rejection and revocation lock the same row, and revocation also revokes every active grant. Authorization reads must join the active membership, active grant, owning teacher profile/class, student, and exact scope rather than trusting a grant row alone.
 
 - [ ] **Step 1: Write the failing authorization-matrix tests**
 
@@ -676,6 +685,8 @@ active -> revoked
 ```
 
 Only the linked guardian may approve, reject, or revoke. Approval changes `requested` directly to `active` and creates the sharing grant in the same transaction. A teacher may issue an invite and see request status but cannot activate sharing. Every transition appends an audit event containing membership ID, student profile ID, class ID, old state, and new state.
+
+Creating a request also writes the `null -> requested` audit transition. Repeated or concurrent requests must not create two open rows. Unrelated actors receive the same 403 response for missing and existing student targets at the route policy boundary. Invite codes must be generated with a cryptographically secure injected generator rather than accepted from the request body.
 
 - [ ] **Step 5: Run permission, integration, and type tests**
 
