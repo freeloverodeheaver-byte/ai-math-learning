@@ -238,6 +238,7 @@ export class AccessService {
       membership === undefined ||
       membership.id !== preview.id ||
       membership.studentProfileId !== preview.studentProfileId ||
+      membership.classId !== preview.classId ||
       membership.state !== preview.state
     ) {
       throw new ForbiddenError();

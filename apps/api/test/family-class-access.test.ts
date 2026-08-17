@@ -814,6 +814,44 @@ describe("guardian relationship lock ordering", () => {
       scenario.membership.id,
     )).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
   });
+
+  it("returns 403 without grant or transition audit when the class changes after preview", async () => {
+    const scenario = await createRequestedMembership();
+    class ChangedClassRepository extends AccessRepository {
+      override async lockMembership(
+        transaction: AccessTransaction,
+        membershipId: string,
+      ): Promise<ClassMembership | undefined> {
+        const membership = await super.lockMembership(transaction, membershipId);
+        return membership === undefined
+          ? undefined
+          : { ...membership, classId: randomUUID() };
+      }
+    }
+    const service = new AccessService(
+      integrationDb,
+      new ChangedClassRepository(integrationDb),
+    );
+
+    await expect(service.approveClassMembership(
+      scenario.guardian,
+      scenario.membership.id,
+    )).rejects.toMatchObject({ statusCode: 403, code: "FORBIDDEN" });
+
+    const [grantCount] = await integrationDb
+      .select({ value: count() })
+      .from(dataSharingGrants)
+      .where(eq(dataSharingGrants.classMembershipId, scenario.membership.id));
+    const [approvalAuditCount] = await integrationDb
+      .select({ value: count() })
+      .from(auditEvents)
+      .where(and(
+        eq(auditEvents.subjectId, scenario.membership.id),
+        eq(auditEvents.action, "class.membership.approved"),
+      ));
+    expect(grantCount?.value).toBe(0);
+    expect(approvalAuditCount?.value).toBe(0);
+  });
 });
 
 function actorHeaders(actor: Actor): Record<string, string> {

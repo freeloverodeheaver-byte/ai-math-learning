@@ -529,6 +529,71 @@ describe("access migration invariants", () => {
     })).resolves.toBeUndefined();
   });
 
+  it("rejects atomically rebinding a membership and its unrevoked grant to another student", async () => {
+    const fixture = await createAccessFixture();
+    const membershipId = randomUUID();
+    await pglite.transaction(async (tx) => {
+      await tx.query(
+        "insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values ($1, $2, $3, 'active', now())",
+        [membershipId, fixture.classId, fixture.studentProfileId],
+      );
+      await tx.query(
+        "insert into data_sharing_grants (class_membership_id, student_profile_id, scope) values ($1, $2, 'learning_summary')",
+        [membershipId, fixture.studentProfileId],
+      );
+    });
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query(
+        "update class_memberships set student_profile_id = $1 where id = $2",
+        [fixture.otherStudentProfileId, membershipId],
+      );
+      await tx.query(
+        "update data_sharing_grants set student_profile_id = $1 where class_membership_id = $2",
+        [fixture.otherStudentProfileId, membershipId],
+      );
+    })).rejects.toThrow(/active grant/i);
+  });
+
+  it("rejects moving an unrevoked grant but permits moving it after revocation", async () => {
+    const fixture = await createAccessFixture();
+    const sourceMembershipId = randomUUID();
+    const targetMembershipId = randomUUID();
+    const grantId = randomUUID();
+    await pglite.transaction(async (tx) => {
+      await tx.query(
+        `insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values
+          ($1, $3, $4, 'active', now()), ($2, $3, $5, 'active', now())`,
+        [
+          sourceMembershipId,
+          targetMembershipId,
+          fixture.classId,
+          fixture.studentProfileId,
+          fixture.otherStudentProfileId,
+        ],
+      );
+      await tx.query(
+        "insert into data_sharing_grants (id, class_membership_id, student_profile_id, scope) values ($1, $2, $3, 'learning_summary')",
+        [grantId, sourceMembershipId, fixture.studentProfileId],
+      );
+    });
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query(
+        "update data_sharing_grants set class_membership_id = $1, student_profile_id = $2 where id = $3",
+        [targetMembershipId, fixture.otherStudentProfileId, grantId],
+      );
+    })).rejects.toThrow(/unrevoked grant/i);
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query("update data_sharing_grants set revoked_at = now() where id = $1", [grantId]);
+      await tx.query(
+        "update data_sharing_grants set class_membership_id = $1, student_profile_id = $2 where id = $3",
+        [targetMembershipId, fixture.otherStudentProfileId, grantId],
+      );
+    })).resolves.toBeUndefined();
+  });
+
   it("prevents transferring an approved class to another teacher until grants are revoked", async () => {
     const fixture = await createAccessFixture();
     const membershipId = randomUUID();

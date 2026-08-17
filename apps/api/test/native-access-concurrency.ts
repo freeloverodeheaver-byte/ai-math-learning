@@ -93,7 +93,13 @@ async function duplicateRequestRace(dbA: Database, dbB: Database): Promise<void>
   const baseRepository = new AccessRepository(dbA);
   const setupService = new AccessService(dbA, baseRepository);
   const scenario = await seedBase(dbA, setupService);
+  const secondGuardian = await seedActor(dbA, ["guardian"]);
+  await dbA.insert(guardianLinks).values({
+    guardianUserId: secondGuardian.userId,
+    studentProfileId: scenario.student.id,
+  });
   const inserted = deferred();
+  const secondInsertAttempted = deferred();
   const allowCommit = deferred();
 
   class PauseAfterMembershipInsertRepository extends AccessRepository {
@@ -107,11 +113,23 @@ async function duplicateRequestRace(dbA: Database, dbB: Database): Promise<void>
     }
   }
 
+  class SignalBeforeMembershipInsertRepository extends AccessRepository {
+    override async createMembership(
+      ...args: Parameters<AccessRepository["createMembership"]>
+    ): Promise<ClassMembership> {
+      secondInsertAttempted.resolve();
+      return super.createMembership(...args);
+    }
+  }
+
   const firstService = new AccessService(
     dbA,
     new PauseAfterMembershipInsertRepository(dbA),
   );
-  const secondService = new AccessService(dbB, new AccessRepository(dbB));
+  const secondService = new AccessService(
+    dbB,
+    new SignalBeforeMembershipInsertRepository(dbB),
+  );
   const first = firstService.requestClassMembership(
     scenario.guardian,
     scenario.createdClass.inviteCode,
@@ -119,11 +137,12 @@ async function duplicateRequestRace(dbA: Database, dbB: Database): Promise<void>
   );
   await inserted.promise;
   const second = secondService.requestClassMembership(
-    scenario.guardian,
+    secondGuardian,
     scenario.createdClass.inviteCode,
     scenario.student.id,
   );
   const outcomesPromise = Promise.allSettled([first, second]);
+  await secondInsertAttempted.promise;
   allowCommit.resolve();
   const outcomes = await outcomesPromise;
 

@@ -130,6 +130,15 @@ ADD CONSTRAINT data_sharing_grants_scope_check CHECK (
 
 CREATE FUNCTION enforce_active_data_sharing_grant() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.revoked_at IS NULL AND (
+      NEW.class_membership_id IS DISTINCT FROM OLD.class_membership_id
+      OR NEW.student_profile_id IS DISTINCT FROM OLD.student_profile_id
+    ) THEN
+      RAISE EXCEPTION 'an unrevoked grant cannot be rebound to another membership or student';
+    END IF;
+  END IF;
+
   IF NEW.revoked_at IS NULL AND NOT EXISTS (
     SELECT 1
     FROM class_memberships AS membership
@@ -152,16 +161,15 @@ FOR EACH ROW EXECUTE FUNCTION enforce_active_data_sharing_grant();
 
 CREATE FUNCTION enforce_membership_active_grants() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF EXISTS (
+  IF (
+    NEW.student_profile_id IS DISTINCT FROM OLD.student_profile_id
+    OR NEW.class_id IS DISTINCT FROM OLD.class_id
+    OR NEW.state <> 'active'
+  ) AND EXISTS (
     SELECT 1
     FROM data_sharing_grants AS sharing_grant
-    WHERE sharing_grant.class_membership_id = NEW.id
+    WHERE sharing_grant.class_membership_id = OLD.id
       AND sharing_grant.revoked_at IS NULL
-      AND (
-        NEW.state <> 'active'
-        OR NEW.class_id IS DISTINCT FROM OLD.class_id
-        OR sharing_grant.student_profile_id <> NEW.student_profile_id
-      )
   ) THEN
     RAISE EXCEPTION 'a membership with an active grant must remain active for the same student';
   END IF;
