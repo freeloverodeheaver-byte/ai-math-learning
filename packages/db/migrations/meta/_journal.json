@@ -29,6 +29,13 @@
       "when": 1787061600000,
       "tag": "0003_grant_identity_invariants",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787133600000,
+      "tag": "0004_audit_events_append_only",
+      "breakpoints": true
     }
   ]
 }

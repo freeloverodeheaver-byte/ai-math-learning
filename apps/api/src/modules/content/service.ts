@@ -6,7 +6,6 @@ import {
   type KnowledgePointInput,
   type QuestionInput
 } from "@math/contracts";
-import type { PgDatabase } from "drizzle-orm/pg-core";
 import {
   ContentRepository,
   type ContentEntityOwner,
@@ -22,7 +21,19 @@ export interface ImportResult {
   unchanged: number;
 }
 
-type TransactionHost = PgDatabase<any, any, any>;
+export class ContentVersionRegressionError extends Error {
+  readonly code = "CONTENT_VERSION_REGRESSION";
+  readonly statusCode = 409;
+
+  constructor(version: number, latestVersion: number) {
+    super(`Bundle version ${version} is lower than latest version ${latestVersion}`);
+    this.name = "ContentVersionRegressionError";
+  }
+}
+
+export interface ContentTransactionHost {
+  transaction<T>(callback: (transaction: ContentTransaction) => Promise<T>): Promise<T>;
+}
 
 function compareStrings(left: string, right: string): number {
   if (left < right) return -1;
@@ -96,7 +107,7 @@ function questionChanged(input: QuestionInput, state: StableQuestionState): bool
 
 export class ContentService {
   constructor(
-    private readonly database: TransactionHost,
+    private readonly database: ContentTransactionHost,
     private readonly repository: ContentRepository
   ) {}
 
@@ -119,7 +130,7 @@ export class ContentService {
     const tracking = await this.repository.findBundleVersion(transaction, bundle.bundleId, bundle.version);
 
     if (tracking.latestVersion !== undefined && bundle.version < tracking.latestVersion) {
-      throw new Error(`Bundle version ${bundle.version} is lower than latest version ${tracking.latestVersion}`);
+      throw new ContentVersionRegressionError(bundle.version, tracking.latestVersion);
     }
     if (tracking.existing !== undefined) {
       if (tracking.existing.payloadHash !== hash) {

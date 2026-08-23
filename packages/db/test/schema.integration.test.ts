@@ -7,6 +7,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import {
+  auditEvents,
   contentBundles,
   contentBundleVersions,
   contentEntityOwners,
@@ -25,6 +26,7 @@ const schemaFixtureBundleId = `schema-fixtures-${testId}`;
 const pglite = await PGlite.create({ extensions: { pgcrypto } });
 const db = drizzle(pglite, {
   schema: {
+    auditEvents,
     contentBundles,
     contentBundleVersions,
     contentEntityOwners,
@@ -70,6 +72,24 @@ async function insertOwnedQuestion(value: typeof questions.$inferInsert) {
 }
 
 describe("foundation schema", () => {
+  it("rejects updating and deleting audit events at the database layer", async () => {
+    const [event] = await db.insert(auditEvents).values({
+      actorUserId: null,
+      action: "audit.append-only.probe",
+      subjectType: "audit_probe",
+      subjectId: randomUUID(),
+      metadata: { immutable: true }
+    }).returning({ id: auditEvents.id });
+
+    await expect(db.update(auditEvents)
+      .set({ metadata: { immutable: false } })
+      .where(eq(auditEvents.id, event!.id))).rejects.toThrow();
+    await expect(db.delete(auditEvents)
+      .where(eq(auditEvents.id, event!.id))).rejects.toThrow();
+    await expect(db.select().from(auditEvents)
+      .where(eq(auditEvents.id, event!.id))).resolves.toHaveLength(1);
+  });
+
   it("keeps a stable question id while content versions change", async () => {
     const [question] = await insertOwnedQuestion({ externalKey: `mock-q-${testId}` });
 

@@ -11,11 +11,14 @@ import {
   questions,
   sources
 } from "@math/db";
-import { and, desc, eq } from "drizzle-orm";
-import type { PgDatabase } from "drizzle-orm/pg-core";
+import { and, desc, eq, inArray } from "drizzle-orm";
+import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
 
-export type ContentTransaction = PgDatabase<any, any, any>;
+export type ContentTransaction = Pick<
+  PgDatabase<PgQueryResultHKT>,
+  "select" | "insert" | "update" | "delete"
+>;
 
 export interface BundleVersionState {
   existing: { payloadHash: string } | undefined;
@@ -54,6 +57,44 @@ export interface StableQuestionState {
 }
 
 export class ContentRepository {
+  async publishBundleRevision(
+    transaction: ContentTransaction,
+    bundleId: string,
+    version: number
+  ): Promise<void> {
+    const bundleKnowledgeIds = transaction
+      .select({ id: knowledgePoints.id })
+      .from(knowledgePoints)
+      .innerJoin(contentEntityOwners, and(
+        eq(contentEntityOwners.entityType, "knowledge"),
+        eq(contentEntityOwners.entityKey, knowledgePoints.canonicalId)
+      ))
+      .where(eq(contentEntityOwners.bundleId, bundleId));
+    const bundleQuestionIds = transaction
+      .select({ id: questions.id })
+      .from(questions)
+      .innerJoin(contentEntityOwners, and(
+        eq(contentEntityOwners.entityType, "question"),
+        eq(contentEntityOwners.entityKey, questions.externalKey)
+      ))
+      .where(eq(contentEntityOwners.bundleId, bundleId));
+
+    await transaction
+      .update(knowledgePointVersions)
+      .set({ reviewState: "published" })
+      .where(and(
+        eq(knowledgePointVersions.version, version),
+        inArray(knowledgePointVersions.knowledgePointId, bundleKnowledgeIds)
+      ));
+    await transaction
+      .update(questionVersions)
+      .set({ reviewState: "published" })
+      .where(and(
+        eq(questionVersions.version, version),
+        inArray(questionVersions.questionId, bundleQuestionIds)
+      ));
+  }
+
   async lockBundle(transaction: ContentTransaction, bundleId: string): Promise<void> {
     await transaction
       .insert(contentBundles)

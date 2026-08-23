@@ -49,6 +49,25 @@ afterEach(async () => {
 });
 
 describe("built migration package", () => {
+  it("packages the audit append-only trigger in the built journal", async () => {
+    pglite = await PGlite.create({ extensions: { pgcrypto } });
+    await applyJournaledMigrations(pglite, new URL("../dist/migrations/", import.meta.url));
+    const subjectId = randomUUID();
+    const inserted = await pglite.query<{ id: string }>(
+      `insert into audit_events (action, subject_type, subject_id, metadata)
+       values ('audit.append-only.built', 'audit_probe', $1, '{}') returning id`,
+      [subjectId],
+    );
+    const eventId = inserted.rows[0]!.id;
+
+    await expect(pglite.query(
+      "update audit_events set metadata = '{\"mutated\":true}' where id = $1",
+      [eventId],
+    )).rejects.toThrow(/append-only/i);
+    await expect(pglite.query("delete from audit_events where id = $1", [eventId]))
+      .rejects.toThrow(/append-only/i);
+  });
+
   it("executes every built journaled migration without source migrations", async () => {
     pglite = await PGlite.create({ extensions: { pgcrypto } });
     const tags = await applyJournaledMigrations(pglite, new URL("../dist/migrations/", import.meta.url));

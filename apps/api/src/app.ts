@@ -4,6 +4,10 @@ import {
   registerAccessRoutes,
   type AccessRoutesOptions,
 } from "./modules/access/routes.js";
+import {
+  registerContentRoutes,
+  type ContentRoutesOptions,
+} from "./modules/content/routes.js";
 import { registerHealthRoutes } from "./modules/health/routes.js";
 import { DevIdentityProvider } from "./modules/identity/dev-identity-provider.js";
 import { AnonymousIdentityProvider } from "./modules/identity/identity-provider.js";
@@ -13,6 +17,7 @@ export interface BuildAppOptions {
   logger?: boolean;
   actorPlugin?: ActorPluginOptions;
   accessRoutes?: AccessRoutesOptions;
+  contentRoutes?: ContentRoutesOptions;
 }
 
 export function actorPluginOptionsFromConfig(config: AppConfig): ActorPluginOptions {
@@ -33,6 +38,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     nodeEnv: "development",
     devIdentityEnabled: false,
   });
+  await app.register(registerContentRoutes, options.contentRoutes ?? {});
   if (options.accessRoutes !== undefined) {
     await app.register(registerAccessRoutes, options.accessRoutes);
   }
