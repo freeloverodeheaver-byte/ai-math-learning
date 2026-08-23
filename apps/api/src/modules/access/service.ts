@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import type { Actor } from "@math/contracts";
-import type { PgDatabase } from "drizzle-orm/pg-core";
 import { ForbiddenError, requireRole } from "../../plugins/actor.js";
 import type {
   Class,
@@ -12,7 +11,9 @@ import type {
 } from "./repository.js";
 import { AccessRepository, type AccessTransaction } from "./repository.js";
 
-type TransactionHost = PgDatabase<any, any, any>;
+export interface AccessTransactionHost {
+  transaction<T>(callback: (transaction: AccessTransaction) => Promise<T>): Promise<T>;
+}
 export type InviteCodeGenerator = () => string;
 
 export class ConflictError extends Error {
@@ -42,7 +43,7 @@ function uniqueViolationConstraint(error: unknown): string | undefined {
 
 export class AccessService {
   constructor(
-    private readonly database: TransactionHost,
+    private readonly database: AccessTransactionHost,
     private readonly repository: AccessRepository,
     private readonly inviteCodeGenerator: InviteCodeGenerator = defaultInviteCodeGenerator,
   ) {}

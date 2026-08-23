@@ -1,7 +1,10 @@
-import { ContentBundleSchema } from "@math/contracts";
 import type { FastifyPluginAsync } from "fastify";
 import { ForbiddenError, requireActor, requireRole } from "../../plugins/actor.js";
 import type { AuditService } from "../audit/service.js";
+import {
+  ContentImportWorkflow,
+  PublishableContentBundleSchema,
+} from "./import-workflow.js";
 import {
   SourceProvenanceConflictError,
   type ContentRepository,
@@ -18,21 +21,23 @@ export interface ContentRoutesOptions {
   contentService?: ContentService;
   contentRepository?: ContentRepository;
   auditService?: AuditService;
+  importWorkflow?: ContentImportWorkflow;
 }
 
-const PublishableContentBundleSchema = ContentBundleSchema.superRefine((bundle, context) => {
-  for (const [index, question] of bundle.questions.entries()) {
-    if (question.sourceKind === "ai_generated") {
-      context.addIssue({
-        code: "custom",
-        message: "AI-generated content cannot be published",
-        path: ["questions", index, "sourceKind"],
-      });
-    }
-  }
-});
-
 export const registerContentRoutes: FastifyPluginAsync<ContentRoutesOptions> = async (app, options) => {
+  app.get("/operator/content/questions/published", async (request, reply) => {
+    const actor = requireActor(request);
+    requireRole(actor, ["operator"]);
+    const { database, contentRepository } = options;
+    if (database === undefined || contentRepository === undefined) {
+      return reply.code(503).send({ code: "CONTENT_READ_UNAVAILABLE" });
+    }
+    const publishedQuestions = await database.transaction((transaction) =>
+      contentRepository.listLatestPublishedQuestions(transaction)
+    );
+    return { questions: publishedQuestions };
+  });
+
   app.post("/operator/content/bundles/validate", async (request, reply) => {
     const actor = requireActor(request);
     requireRole(actor, ["operator"]);
@@ -77,43 +82,20 @@ export const registerContentRoutes: FastifyPluginAsync<ContentRoutesOptions> = a
       });
     }
     const { database, contentService, contentRepository, auditService } = options;
-    if (
-      database === undefined ||
-      contentService === undefined ||
-      contentRepository === undefined ||
-      auditService === undefined
-    ) {
+    const importWorkflow = options.importWorkflow ?? (
+      database !== undefined &&
+      contentService !== undefined &&
+      contentRepository !== undefined &&
+      auditService !== undefined
+        ? new ContentImportWorkflow(database, contentService, contentRepository, auditService)
+        : undefined
+    );
+    if (importWorkflow === undefined) {
       return reply.code(503).send({ code: "CONTENT_IMPORT_UNAVAILABLE" });
     }
 
     try {
-      const result = await database.transaction(async (transaction) => {
-        const imported = await contentService.importBundle(parsed.data, actor, transaction);
-        const publication = await contentRepository.publishBundleRevision(transaction, parsed.data);
-        await auditService.record(transaction, {
-          actorUserId: actor.userId,
-          action: "content.bundle.imported",
-          subjectType: "content_bundle",
-          subjectId: parsed.data.bundleId,
-          metadata: {
-            bundleId: parsed.data.bundleId,
-            version: parsed.data.version,
-            result: imported,
-          },
-        });
-        await auditService.record(transaction, {
-          actorUserId: actor.userId,
-          action: "content.bundle.published",
-          subjectType: "content_bundle",
-          subjectId: parsed.data.bundleId,
-          metadata: {
-            bundleId: parsed.data.bundleId,
-            version: parsed.data.version,
-            result: publication,
-          },
-        });
-        return imported;
-      });
+      const result = await importWorkflow.execute(parsed.data, { actor });
       return reply.code(201).send({
         bundleId: parsed.data.bundleId,
         version: parsed.data.version,

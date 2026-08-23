@@ -7,7 +7,7 @@
     "dev": "tsx watch src/main.ts",
     "seed": "pnpm --filter @math/api... build && node dist/src/modules/content/seed.js",
     "start": "tsx src/main.ts",
-    "test": "vitest run --exclude dist/**",
+    "test": "vitest run --exclude dist/** --testTimeout 15000",
     "test:native-access-concurrency": "pnpm --filter @math/api... build && node dist/test/native-access-concurrency.js",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

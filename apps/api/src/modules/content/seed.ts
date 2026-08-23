@@ -1,16 +1,34 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { ContentBundleSchema, type Actor } from "@math/contracts";
+import { ContentBundleSchema, type ContentBundle } from "@math/contracts";
 import { createDb } from "@math/db";
+import { AuditRepository } from "../audit/repository.js";
+import { AuditService } from "../audit/service.js";
+import { ContentImportWorkflow } from "./import-workflow.js";
 import { ContentRepository } from "./repository.js";
-import { ContentService } from "./service.js";
-
-const seedActor: Actor = { userId: "content-seed", roles: ["operator"] };
+import { ContentService, type ContentTransactionHost, type ImportResult } from "./service.js";
 
 export function resolveBundlePath(args: readonly string[]): string {
   const bundlePath = args[0] === "--" ? args[1] : args[0];
   if (!bundlePath) throw new Error("A content bundle JSON path is required");
   return bundlePath;
+}
+
+export async function seedContentBundle(
+  database: ContentTransactionHost,
+  bundle: ContentBundle,
+): Promise<ImportResult> {
+  const repository = new ContentRepository();
+  const workflow = new ContentImportWorkflow(
+    database,
+    new ContentService(database, repository),
+    repository,
+    new AuditService(new AuditRepository()),
+  );
+  return workflow.execute(bundle, {
+    actor: null,
+    metadata: { initiator: "system_seed" },
+  });
 }
 
 export async function runSeed(
@@ -25,8 +43,7 @@ export async function runSeed(
   try {
     const payload: unknown = JSON.parse(await readFile(bundlePath, "utf8"));
     const bundle = ContentBundleSchema.parse(payload);
-    const service = new ContentService(database, new ContentRepository());
-    const result = await service.importBundle(bundle, seedActor);
+    const result = await seedContentBundle(database, bundle);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally {
     await database.$client.end();

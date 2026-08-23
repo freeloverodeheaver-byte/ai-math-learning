@@ -16,7 +16,7 @@ import {
   questions,
   sources
 } from "@math/db";
-import { and, desc, eq, lte } from "drizzle-orm";
+import { and, asc, desc, eq, lte } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
 
@@ -69,6 +69,15 @@ export interface PublicationResult {
   questions: number;
 }
 
+export interface PublishedQuestion {
+  externalKey: string;
+  version: number;
+  stem: string;
+  answer: string;
+  explanation: string;
+  difficulty: number | null;
+}
+
 export class IncompletePublicationError extends Error {
   constructor(entityType: "knowledge" | "question", entityKey: string, version: number) {
     super(`No effective ${entityType} version for ${entityKey} at bundle version ${version}`);
@@ -94,6 +103,30 @@ export class SourceProvenanceConflictError extends Error {
 }
 
 export class ContentRepository {
+  async listLatestPublishedQuestions(
+    transaction: ContentTransaction,
+  ): Promise<PublishedQuestion[]> {
+    const rows = await transaction
+      .select({
+        externalKey: questions.externalKey,
+        version: questionVersions.version,
+        stem: questionVersions.stem,
+        answer: questionVersions.answer,
+        explanation: questionVersions.explanation,
+        difficulty: questionVersions.difficulty,
+      })
+      .from(questionVersions)
+      .innerJoin(questions, eq(questionVersions.questionId, questions.id))
+      .where(eq(questionVersions.reviewState, "published"))
+      .orderBy(asc(questions.externalKey), desc(questionVersions.version));
+
+    const latest: PublishedQuestion[] = [];
+    for (const row of rows) {
+      if (latest.at(-1)?.externalKey !== row.externalKey) latest.push(row);
+    }
+    return latest;
+  }
+
   async publishBundleRevision(
     transaction: ContentTransaction,
     bundle: ContentBundle

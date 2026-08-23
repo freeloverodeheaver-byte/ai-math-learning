@@ -10,10 +10,13 @@ import {
   users,
 } from "@math/db";
 import { and, eq, isNull } from "drizzle-orm";
-import type { PgDatabase } from "drizzle-orm/pg-core";
+import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import type { AccessDecisionRepository, SharingScope } from "./policy.js";
 
-export type AccessTransaction = PgDatabase<any, any, any>;
+export type AccessTransaction = Pick<
+  PgDatabase<PgQueryResultHKT>,
+  "select" | "insert" | "update"
+>;
 
 export interface CreateStudentInput {
   studentExternalSubject: string;

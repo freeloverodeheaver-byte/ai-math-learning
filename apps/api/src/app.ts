@@ -11,7 +11,12 @@ import {
 import { registerHealthRoutes } from "./modules/health/routes.js";
 import { DevIdentityProvider } from "./modules/identity/dev-identity-provider.js";
 import { AnonymousIdentityProvider } from "./modules/identity/identity-provider.js";
-import { registerActorPlugin, type ActorPluginOptions } from "./plugins/actor.js";
+import {
+  ForbiddenError,
+  registerActorPlugin,
+  UnauthorizedError,
+  type ActorPluginOptions,
+} from "./plugins/actor.js";
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -32,6 +37,13 @@ export function actorPluginOptionsFromConfig(config: AppConfig): ActorPluginOpti
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({ logger: options.logger ?? false });
+
+  app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof UnauthorizedError || error instanceof ForbiddenError) {
+      return reply.code(error.statusCode).send({ code: error.code });
+    }
+    return reply.send(error);
+  });
 
   await registerActorPlugin(app, options.actorPlugin ?? {
     provider: new AnonymousIdentityProvider(),
