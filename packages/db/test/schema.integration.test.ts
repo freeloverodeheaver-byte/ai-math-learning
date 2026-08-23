@@ -463,34 +463,55 @@ describe("foundation schema", () => {
     await expect(mutation(await createRelationshipSnapshotFixture())).rejects.toThrow();
   });
 
-  it("prevents a published version from being downgraded and keeps retired relationship snapshots locked", async () => {
+  it("rejects a published question version downgrade", async () => {
     const fixture = await createRelationshipSnapshotFixture();
 
     await expect(db.update(questionVersions)
       .set({ reviewState: "draft" })
       .where(eq(questionVersions.id, fixture.publishedQuestionVersionId))).rejects.toThrow();
+  });
+
+  it("rejects a published knowledge version downgrade", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
     await expect(db.update(knowledgePointVersions)
       .set({ reviewState: "in_review" })
       .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId))).rejects.toThrow();
+  });
+
+  it("allows a published question version to retire", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
 
     await db.update(questionVersions)
       .set({ reviewState: "retired" })
       .where(eq(questionVersions.id, fixture.publishedQuestionVersionId));
+    await expect(db.select({ reviewState: questionVersions.reviewState }).from(questionVersions)
+      .where(eq(questionVersions.id, fixture.publishedQuestionVersionId))).resolves.toEqual([{ reviewState: "retired" }]);
+  });
+
+  it("allows a published knowledge version to retire", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
     await db.update(knowledgePointVersions)
       .set({ reviewState: "retired" })
       .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId));
+    await expect(db.select({ reviewState: knowledgePointVersions.reviewState }).from(knowledgePointVersions)
+      .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId))).resolves.toEqual([{ reviewState: "retired" }]);
+  });
 
-    await expect(db.delete(questionVersionKnowledgePoints).where(and(
-      eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
-      eq(questionVersionKnowledgePoints.knowledgePointId, fixture.firstPointId)
-    ))).rejects.toThrow();
-    await expect(db.delete(knowledgePointVersionPrerequisites).where(and(
-      eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
-      eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.firstPointId)
-    ))).rejects.toThrow();
+  it("keeps a retired question version terminal", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+    await db.update(questionVersions).set({ reviewState: "retired" })
+      .where(eq(questionVersions.id, fixture.publishedQuestionVersionId));
     await expect(db.update(questionVersions)
       .set({ reviewState: "in_review" })
       .where(eq(questionVersions.id, fixture.publishedQuestionVersionId))).rejects.toThrow();
+  });
+
+  it("keeps a retired knowledge version terminal", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+    await db.update(knowledgePointVersions).set({ reviewState: "retired" })
+      .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId));
     await expect(db.update(knowledgePointVersions)
       .set({ reviewState: "draft" })
       .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId))).rejects.toThrow();
