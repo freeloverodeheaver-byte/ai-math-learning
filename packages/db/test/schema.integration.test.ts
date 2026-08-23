@@ -380,6 +380,89 @@ describe("foundation schema", () => {
       ))).rejects.toThrow();
   });
 
+  it.each([
+    ["a published question target update", (fixture: RelationshipSnapshotFixture) => db.update(questionVersionKnowledgePoints)
+      .set({ knowledgePointId: fixture.secondPointId })
+      .where(and(eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId), eq(questionVersionKnowledgePoints.knowledgePointId, fixture.firstPointId)))],
+    ["a published question owner reassignment", (fixture: RelationshipSnapshotFixture) => db.update(questionVersionKnowledgePoints)
+      .set({ questionVersionId: fixture.draftQuestionVersionId })
+      .where(and(eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId), eq(questionVersionKnowledgePoints.knowledgePointId, fixture.firstPointId)))],
+    ["a question reassignment into a published owner", (fixture: RelationshipSnapshotFixture) => db.update(questionVersionKnowledgePoints)
+      .set({ questionVersionId: fixture.publishedQuestionVersionId })
+      .where(and(eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId), eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdPointId)))],
+    ["a published question delete and replacement", (fixture: RelationshipSnapshotFixture) => db.transaction(async (tx) => {
+      await tx.delete(questionVersionKnowledgePoints).where(and(eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId), eq(questionVersionKnowledgePoints.knowledgePointId, fixture.firstPointId)));
+      await tx.insert(questionVersionKnowledgePoints).values({ questionVersionId: fixture.publishedQuestionVersionId, knowledgePointId: fixture.secondPointId });
+    })],
+    ["an insert into a published question", (fixture: RelationshipSnapshotFixture) => db.insert(questionVersionKnowledgePoints)
+      .values({ questionVersionId: fixture.publishedQuestionVersionId, knowledgePointId: fixture.thirdPointId })],
+    ["a combined question owner and target update into a published owner", (fixture: RelationshipSnapshotFixture) => db.update(questionVersionKnowledgePoints)
+      .set({ questionVersionId: fixture.publishedQuestionVersionId, knowledgePointId: fixture.secondPointId })
+      .where(and(eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId), eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdPointId)))],
+  ])("rejects %s independently", async (_name, mutation) => {
+    await expect(mutation(await createRelationshipSnapshotFixture())).rejects.toThrow();
+  });
+
+  it.each([
+    ["a published knowledge prerequisite target update", (fixture: RelationshipSnapshotFixture) => db.update(knowledgePointVersionPrerequisites)
+      .set({ prerequisiteKnowledgePointId: fixture.secondPointId })
+      .where(and(eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId), eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.firstPointId)))],
+    ["a published knowledge prerequisite owner reassignment", (fixture: RelationshipSnapshotFixture) => db.update(knowledgePointVersionPrerequisites)
+      .set({ knowledgePointVersionId: fixture.draftKnowledgeVersionId })
+      .where(and(eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId), eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.firstPointId)))],
+    ["a prerequisite reassignment into a published owner", (fixture: RelationshipSnapshotFixture) => db.update(knowledgePointVersionPrerequisites)
+      .set({ knowledgePointVersionId: fixture.publishedKnowledgeVersionId })
+      .where(and(eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId), eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.thirdPointId)))],
+    ["a published knowledge prerequisite delete and replacement", (fixture: RelationshipSnapshotFixture) => db.transaction(async (tx) => {
+      await tx.delete(knowledgePointVersionPrerequisites).where(and(eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId), eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.firstPointId)));
+      await tx.insert(knowledgePointVersionPrerequisites).values({ knowledgePointVersionId: fixture.publishedKnowledgeVersionId, prerequisiteKnowledgePointId: fixture.secondPointId });
+    })],
+    ["an insert into a published knowledge prerequisite snapshot", (fixture: RelationshipSnapshotFixture) => db.insert(knowledgePointVersionPrerequisites)
+      .values({ knowledgePointVersionId: fixture.publishedKnowledgeVersionId, prerequisiteKnowledgePointId: fixture.thirdPointId })],
+    ["a combined knowledge owner and target update into a published owner", (fixture: RelationshipSnapshotFixture) => db.update(knowledgePointVersionPrerequisites)
+      .set({ knowledgePointVersionId: fixture.publishedKnowledgeVersionId, prerequisiteKnowledgePointId: fixture.secondPointId })
+      .where(and(eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId), eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.thirdPointId)))],
+  ])("rejects %s independently", async (_name, mutation) => {
+    await expect(mutation(await createRelationshipSnapshotFixture())).rejects.toThrow();
+  });
+
+  it.each([
+    ["a retired question insert", async (fixture: RelationshipSnapshotFixture) => {
+      await db.update(questionVersions).set({ reviewState: "retired" }).where(eq(questionVersions.id, fixture.publishedQuestionVersionId));
+      return db.insert(questionVersionKnowledgePoints).values({ questionVersionId: fixture.publishedQuestionVersionId, knowledgePointId: fixture.secondPointId });
+    }],
+    ["a retired question target update", async (fixture: RelationshipSnapshotFixture) => {
+      await db.update(questionVersions).set({ reviewState: "retired" }).where(eq(questionVersions.id, fixture.publishedQuestionVersionId));
+      return db.update(questionVersionKnowledgePoints).set({ knowledgePointId: fixture.secondPointId }).where(and(eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId), eq(questionVersionKnowledgePoints.knowledgePointId, fixture.firstPointId)));
+    }],
+    ["a retired question reassignment", async (fixture: RelationshipSnapshotFixture) => {
+      await db.update(questionVersions).set({ reviewState: "retired" }).where(eq(questionVersions.id, fixture.publishedQuestionVersionId));
+      return db.update(questionVersionKnowledgePoints).set({ questionVersionId: fixture.publishedQuestionVersionId }).where(and(eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId), eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdPointId)));
+    }],
+    ["a retired combined question owner and target update", async (fixture: RelationshipSnapshotFixture) => {
+      await db.update(questionVersions).set({ reviewState: "retired" }).where(eq(questionVersions.id, fixture.publishedQuestionVersionId));
+      return db.update(questionVersionKnowledgePoints).set({ questionVersionId: fixture.publishedQuestionVersionId, knowledgePointId: fixture.secondPointId }).where(and(eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId), eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdPointId)));
+    }],
+    ["a retired knowledge prerequisite insert", async (fixture: RelationshipSnapshotFixture) => {
+      await db.update(knowledgePointVersions).set({ reviewState: "retired" }).where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId));
+      return db.insert(knowledgePointVersionPrerequisites).values({ knowledgePointVersionId: fixture.publishedKnowledgeVersionId, prerequisiteKnowledgePointId: fixture.secondPointId });
+    }],
+    ["a retired knowledge prerequisite target update", async (fixture: RelationshipSnapshotFixture) => {
+      await db.update(knowledgePointVersions).set({ reviewState: "retired" }).where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId));
+      return db.update(knowledgePointVersionPrerequisites).set({ prerequisiteKnowledgePointId: fixture.secondPointId }).where(and(eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId), eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.firstPointId)));
+    }],
+    ["a retired knowledge prerequisite reassignment", async (fixture: RelationshipSnapshotFixture) => {
+      await db.update(knowledgePointVersions).set({ reviewState: "retired" }).where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId));
+      return db.update(knowledgePointVersionPrerequisites).set({ knowledgePointVersionId: fixture.publishedKnowledgeVersionId }).where(and(eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId), eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.thirdPointId)));
+    }],
+    ["a retired combined knowledge owner and target update", async (fixture: RelationshipSnapshotFixture) => {
+      await db.update(knowledgePointVersions).set({ reviewState: "retired" }).where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId));
+      return db.update(knowledgePointVersionPrerequisites).set({ knowledgePointVersionId: fixture.publishedKnowledgeVersionId, prerequisiteKnowledgePointId: fixture.secondPointId }).where(and(eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId), eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.thirdPointId)));
+    }],
+  ])("rejects %s independently", async (_name, mutation) => {
+    await expect(mutation(await createRelationshipSnapshotFixture())).rejects.toThrow();
+  });
+
   it("prevents a published version from being downgraded and keeps retired relationship snapshots locked", async () => {
     const fixture = await createRelationshipSnapshotFixture();
 
@@ -450,6 +533,41 @@ describe("foundation schema", () => {
         prerequisiteKnowledgePointId: fixture.thirdPointId
       });
     })).resolves.toBeUndefined();
+  });
+
+  it("rejects direct deletion of a published question version", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
+    await expect(db.delete(questionVersions)
+      .where(eq(questionVersions.id, fixture.publishedQuestionVersionId))).rejects.toThrow();
+  });
+
+  it("rejects deleting a published question stable owner through its version cascade", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
+    await expect(db.delete(questions).where(eq(questions.id, fixture.questionId))).rejects.toThrow();
+  });
+
+  it("rejects direct deletion of a published knowledge version", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
+    await expect(db.delete(knowledgePointVersions)
+      .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId))).rejects.toThrow();
+  });
+
+  it("rejects deleting a published knowledge stable owner through its version cascade", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
+    await expect(db.delete(knowledgePoints).where(eq(knowledgePoints.id, fixture.knowledgePointId))).rejects.toThrow();
+  });
+
+  it("keeps direct deletion of editable versions available", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
+    await expect(db.delete(questionVersions)
+      .where(eq(questionVersions.id, fixture.draftQuestionVersionId))).resolves.toMatchObject({ affectedRows: 1 });
+    await expect(db.delete(knowledgePointVersions)
+      .where(eq(knowledgePointVersions.id, fixture.draftKnowledgeVersionId))).resolves.toMatchObject({ affectedRows: 1 });
   });
 
   it("declares the named anti-self prerequisite check", () => {
@@ -577,6 +695,9 @@ interface RelationshipSnapshotFixture {
   firstPointId: string;
   secondPointId: string;
   thirdPointId: string;
+  fourthPointId: string;
+  knowledgePointId: string;
+  questionId: string;
   publishedQuestionVersionId: string;
   draftQuestionVersionId: string;
   publishedKnowledgeVersionId: string;
@@ -599,6 +720,12 @@ async function createRelationshipSnapshotFixture(): Promise<RelationshipSnapshot
   const [thirdPoint] = await insertOwnedKnowledgePoint({
     canonicalId: `relationship-third-${randomUUID()}`,
     name: "Third relationship point",
+    grade: 7,
+    semester: 1
+  });
+  const [fourthPoint] = await insertOwnedKnowledgePoint({
+    canonicalId: `relationship-fourth-${randomUUID()}`,
+    name: "Fourth relationship point",
     grade: 7,
     semester: 1
   });
@@ -656,6 +783,7 @@ async function createRelationshipSnapshotFixture(): Promise<RelationshipSnapshot
     }).returning({ id: questionVersions.id });
     await tx.insert(questionVersionKnowledgePoints).values([
       { questionVersionId: publishedQuestionVersion!.id, knowledgePointId: firstPoint!.id },
+      { questionVersionId: publishedQuestionVersion!.id, knowledgePointId: fourthPoint!.id },
       { questionVersionId: draftQuestionVersion!.id, knowledgePointId: thirdPoint!.id }
     ]);
     await tx.update(questionVersions).set({ reviewState: "published" })
@@ -673,6 +801,9 @@ async function createRelationshipSnapshotFixture(): Promise<RelationshipSnapshot
     firstPointId: firstPoint!.id,
     secondPointId: secondPoint!.id,
     thirdPointId: thirdPoint!.id,
+    fourthPointId: fourthPoint!.id,
+    knowledgePointId: knowledgePoint!.id,
+    questionId: question!.id,
     ...relationshipVersions
   };
 }

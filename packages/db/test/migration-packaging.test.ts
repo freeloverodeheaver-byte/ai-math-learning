@@ -46,6 +46,8 @@ async function createBuiltGrantFixture(): Promise<{ grantId: string }> {
 async function createBuiltRelationshipSnapshotFixture(): Promise<{
   firstPointId: string;
   secondPointId: string;
+  ownerPointId: string;
+  questionId: string;
   publishedKnowledgeVersionId: string;
   publishedQuestionVersionId: string;
 }> {
@@ -120,7 +122,14 @@ async function createBuiltRelationshipSnapshotFixture(): Promise<{
     await tx.query("update question_versions set review_state = 'published' where id = $1", [publishedQuestionVersionId]);
   });
 
-  return { firstPointId, secondPointId, publishedKnowledgeVersionId, publishedQuestionVersionId };
+  return {
+    firstPointId,
+    secondPointId,
+    ownerPointId,
+    questionId,
+    publishedKnowledgeVersionId,
+    publishedQuestionVersionId,
+  };
 }
 
 afterEach(async () => {
@@ -253,5 +262,31 @@ describe("built migration package", () => {
       "update knowledge_point_versions set review_state = 'in_review' where id = $1",
       [fixture.publishedKnowledgeVersionId],
     )).rejects.toThrow();
+  });
+
+  it("uses the built journal to reject direct deletion of a published question version", async () => {
+    const fixture = await createBuiltRelationshipSnapshotFixture();
+
+    await expect(pglite!.query("delete from question_versions where id = $1", [fixture.publishedQuestionVersionId]))
+      .rejects.toThrow();
+  });
+
+  it("uses the built journal to reject a published question owner cascade", async () => {
+    const fixture = await createBuiltRelationshipSnapshotFixture();
+
+    await expect(pglite!.query("delete from questions where id = $1", [fixture.questionId])).rejects.toThrow();
+  });
+
+  it("uses the built journal to reject direct deletion of a published knowledge version", async () => {
+    const fixture = await createBuiltRelationshipSnapshotFixture();
+
+    await expect(pglite!.query("delete from knowledge_point_versions where id = $1", [fixture.publishedKnowledgeVersionId]))
+      .rejects.toThrow();
+  });
+
+  it("uses the built journal to reject a published knowledge owner cascade", async () => {
+    const fixture = await createBuiltRelationshipSnapshotFixture();
+
+    await expect(pglite!.query("delete from knowledge_points where id = $1", [fixture.ownerPointId])).rejects.toThrow();
   });
 });

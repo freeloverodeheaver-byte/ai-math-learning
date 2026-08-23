@@ -50,6 +50,13 @@
       "when": 1787482800000,
       "tag": "0006_published_relationship_snapshot_immutability",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787490000000,
+      "tag": "0007_locked_version_deletion_and_relationship_serialization",
+      "breakpoints": true
     }
   ]
 }
