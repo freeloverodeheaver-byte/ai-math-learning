@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-Use Node.js 24.x and pnpm 10.34.5 (the version pinned by the root `packageManager` field). Docker with Compose is required for the canonical local PostgreSQL runtime. From the repository root, install the already-declared dependencies:
+Use Node.js 24.x or newer and pnpm 10.34.5 (the version pinned by the root `packageManager` field). Node 24 is the minimum supported runtime for this workflow because the package entry scripts use the native `--env-file-if-exists` flag. Docker with Compose is required for the canonical local PostgreSQL runtime. From the repository root, install the already-declared dependencies:
 
 ```sh
 node --version
@@ -14,7 +14,7 @@ This foundation covers grades 7–9 mathematics only.
 
 ## Configure and start PostgreSQL
 
-Copy the environment template, then edit `.env` if the default local port or database credentials conflict with your machine:
+Copy the environment template to the repository root, then edit that root `.env` if the default local port or database credentials conflict with your machine:
 
 ```sh
 cp .env.example .env
@@ -29,7 +29,7 @@ Apply the committed migration journal:
 pnpm db:migrate
 ```
 
-`DATABASE_URL` is used by migration, seed, and API runtime commands. `TEST_DATABASE_URL` is optional and is reserved for the disposable native PostgreSQL release gates below; never point it at a database containing data you need to keep.
+The database migration and API development/start/seed package scripts run from their package directories and automatically load `../../.env`, which resolves to the repository-root `.env`. Values already supplied by the shell or deployment environment take precedence over file values. `DATABASE_URL` is used by migration, seed, and API runtime commands. `TEST_DATABASE_URL` is optional and is reserved for the disposable native PostgreSQL release gates below; never point it at a database containing data you need to keep.
 
 ## Audited published seed
 

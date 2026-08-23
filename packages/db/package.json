@@ -12,7 +12,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-migrations.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "migrate": "tsx src/migrate.ts",
+    "migrate": "node --env-file-if-exists=../../.env --import tsx src/migrate.ts",
     "test:native-migration": "node dist/test/native-migration-smoke.js",
     "test": "pnpm run build && vitest run --exclude dist/**"
   },
