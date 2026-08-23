@@ -11,7 +11,9 @@ import {
   knowledgePointVersions,
   knowledgePoints,
   knowledgePrerequisites,
+  knowledgePointVersionPrerequisites,
   questionKnowledgePoints,
+  questionVersionKnowledgePoints,
   questionVersions,
   questions,
   sources
@@ -99,6 +101,15 @@ export class SourceProvenanceConflictError extends Error {
   constructor(label: string) {
     super(`Source provenance conflict for label: ${label}`);
     this.name = "SourceProvenanceConflictError";
+  }
+}
+
+export class ContentOwnershipConflictError extends Error {
+  readonly code = "CONTENT_OWNERSHIP_CONFLICT";
+  readonly statusCode = 409;
+  constructor(entityType: string, entityKey: string, bundleId: string) {
+    super(`${entityType} ${entityKey} is owned by bundle ${bundleId}`);
+    this.name = "ContentOwnershipConflictError";
   }
 }
 
@@ -230,7 +241,7 @@ export class ContentRepository {
       throw new Error(`Unable to lock ${owner.entityType} ${owner.entityKey}`);
     }
     if (locked.bundleId !== bundleId) {
-      throw new Error(`${owner.entityType} ${owner.entityKey} is owned by bundle ${locked.bundleId}`);
+      throw new ContentOwnershipConflictError(owner.entityType, owner.entityKey, locked.bundleId);
     }
   }
 
@@ -328,6 +339,7 @@ export class ContentRepository {
 
     const [latestVersion] = await transaction
       .select({
+        id: knowledgePointVersions.id,
         version: knowledgePointVersions.version,
         name: knowledgePointVersions.name,
         grade: knowledgePointVersions.grade,
@@ -343,12 +355,12 @@ export class ContentRepository {
     const prerequisitePoint = alias(knowledgePoints, "prerequisite_point");
     const prerequisiteRows = await transaction
       .select({ canonicalId: prerequisitePoint.canonicalId })
-      .from(knowledgePrerequisites)
+      .from(knowledgePointVersionPrerequisites)
       .innerJoin(
         prerequisitePoint,
-        eq(knowledgePrerequisites.prerequisiteKnowledgePointId, prerequisitePoint.id)
+        eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, prerequisitePoint.id)
       )
-      .where(eq(knowledgePrerequisites.knowledgePointId, id));
+      .where(eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, latestVersion.id));
 
     return {
       id,
@@ -385,6 +397,7 @@ export class ContentRepository {
 
     const [latestVersion] = await transaction
       .select({
+        id: questionVersions.id,
         version: questionVersions.version,
         stem: questionVersions.stem,
         answer: questionVersions.answer,
@@ -405,9 +418,9 @@ export class ContentRepository {
 
     const linkRows = await transaction
       .select({ canonicalId: knowledgePoints.canonicalId })
-      .from(questionKnowledgePoints)
-      .innerJoin(knowledgePoints, eq(questionKnowledgePoints.knowledgePointId, knowledgePoints.id))
-      .where(eq(questionKnowledgePoints.questionId, id));
+      .from(questionVersionKnowledgePoints)
+      .innerJoin(knowledgePoints, eq(questionVersionKnowledgePoints.knowledgePointId, knowledgePoints.id))
+      .where(eq(questionVersionKnowledgePoints.questionVersionId, latestVersion.id));
 
     return {
       id,
@@ -434,29 +447,36 @@ export class ContentRepository {
     knowledgePointId: string,
     version: number,
     input: KnowledgePointInput
-  ): Promise<void> {
-    await transaction.insert(knowledgePointVersions).values({
+  ): Promise<string> {
+    const [inserted] = await transaction.insert(knowledgePointVersions).values({
       knowledgePointId,
       version,
       name: input.name,
       grade: input.grade,
       semester: input.semester,
       reviewState: "draft"
-    });
+    }).returning({ id: knowledgePointVersions.id });
+    return inserted!.id;
   }
 
   async replaceKnowledgePrerequisites(
     transaction: ContentTransaction,
-    knowledgePointId: string,
+    knowledgePointVersionId: string,
     prerequisiteKnowledgePointIds: readonly string[]
   ): Promise<void> {
-    await transaction
-      .delete(knowledgePrerequisites)
-      .where(eq(knowledgePrerequisites.knowledgePointId, knowledgePointId));
+    const [version] = await transaction.select({ knowledgePointId: knowledgePointVersions.knowledgePointId })
+      .from(knowledgePointVersions).where(eq(knowledgePointVersions.id, knowledgePointVersionId));
+    await transaction.delete(knowledgePrerequisites)
+      .where(eq(knowledgePrerequisites.knowledgePointId, version!.knowledgePointId));
     if (prerequisiteKnowledgePointIds.length > 0) {
       await transaction.insert(knowledgePrerequisites).values(
         prerequisiteKnowledgePointIds.map((prerequisiteKnowledgePointId) => ({
-          knowledgePointId,
+          knowledgePointId: version!.knowledgePointId, prerequisiteKnowledgePointId
+        }))
+      );
+      await transaction.insert(knowledgePointVersionPrerequisites).values(
+        prerequisiteKnowledgePointIds.map((prerequisiteKnowledgePointId) => ({
+          knowledgePointVersionId,
           prerequisiteKnowledgePointId
         }))
       );
@@ -469,8 +489,8 @@ export class ContentRepository {
     version: number,
     input: QuestionInput,
     sourceId: string
-  ): Promise<void> {
-    await transaction.insert(questionVersions).values({
+  ): Promise<string> {
+    const [inserted] = await transaction.insert(questionVersions).values({
       questionId,
       version,
       stem: input.stem,
@@ -479,18 +499,25 @@ export class ContentRepository {
       difficulty: input.difficulty,
       sourceId,
       reviewState: "draft"
-    });
+    }).returning({ id: questionVersions.id });
+    return inserted!.id;
   }
 
   async replaceQuestionKnowledgeLinks(
     transaction: ContentTransaction,
-    questionId: string,
+    questionVersionId: string,
     knowledgePointIds: readonly string[]
   ): Promise<void> {
-    await transaction.delete(questionKnowledgePoints).where(eq(questionKnowledgePoints.questionId, questionId));
+    const [version] = await transaction.select({ questionId: questionVersions.questionId })
+      .from(questionVersions).where(eq(questionVersions.id, questionVersionId));
+    await transaction.delete(questionKnowledgePoints)
+      .where(eq(questionKnowledgePoints.questionId, version!.questionId));
     if (knowledgePointIds.length > 0) {
       await transaction.insert(questionKnowledgePoints).values(
-        knowledgePointIds.map((knowledgePointId) => ({ questionId, knowledgePointId }))
+        knowledgePointIds.map((knowledgePointId) => ({ questionId: version!.questionId, knowledgePointId }))
+      );
+      await transaction.insert(questionVersionKnowledgePoints).values(
+        knowledgePointIds.map((knowledgePointId) => ({ questionVersionId, knowledgePointId }))
       );
     }
   }

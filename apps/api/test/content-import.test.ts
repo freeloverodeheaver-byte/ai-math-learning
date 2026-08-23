@@ -12,7 +12,9 @@ import {
   knowledgePointVersions,
   knowledgePoints,
   knowledgePrerequisites,
+  knowledgePointVersionPrerequisites,
   questionKnowledgePoints,
+  questionVersionKnowledgePoints,
   questionVersions,
   questions,
   sources
@@ -129,7 +131,7 @@ function createCanonicalReplayBundle(suffix = randomUUID()): ContentBundle {
 }
 
 beforeAll(async () => {
-  for (const migrationName of ["0000_foundation.sql", "0001_content_import_tracking.sql"]) {
+  for (const migrationName of ["0000_foundation.sql", "0001_content_import_tracking.sql", "0005_versioned_content_relationships.sql"]) {
     const migrationPath = fileURLToPath(new URL(`../../../packages/db/migrations/${migrationName}`, import.meta.url));
     await pglite.exec(await readFile(migrationPath, "utf8"));
   }
@@ -491,12 +493,31 @@ describe("ContentService.importBundle", () => {
       .select()
       .from(questionKnowledgePoints)
       .where(eq(questionKnowledgePoints.questionId, stableQuestion!.id));
+    const questionVersionLinks = await db.select({
+      version: questionVersions.version,
+      knowledgePointId: questionVersionKnowledgePoints.knowledgePointId,
+    }).from(questionVersions)
+      .innerJoin(questionVersionKnowledgePoints, eq(questionVersionKnowledgePoints.questionVersionId, questionVersions.id))
+      .where(eq(questionVersions.questionId, stableQuestion!.id));
+    const operationVersions = await db.select({ id: knowledgePointVersions.id, version: knowledgePointVersions.version })
+      .from(knowledgePointVersions)
+      .where(eq(knowledgePointVersions.knowledgePointId, idByCanonicalId.get(operationsId)!));
+    const prerequisiteSnapshots = await db.select().from(knowledgePointVersionPrerequisites)
+      .where(inArray(knowledgePointVersionPrerequisites.knowledgePointVersionId, operationVersions.map((row) => row.id)));
 
     expect(result).toEqual({ createdKnowledge: 0, createdQuestions: 0, newVersions: 2, unchanged: 1 });
     expect(prerequisiteRows).toEqual([]);
     expect(questionLinks).toEqual([{
       questionId: stableQuestion!.id,
       knowledgePointId: idByCanonicalId.get(rationalId)
+    }]);
+    expect(questionVersionLinks).toEqual(expect.arrayContaining([
+      { version: 1, knowledgePointId: idByCanonicalId.get(operationsId) },
+      { version: 2, knowledgePointId: idByCanonicalId.get(rationalId) },
+    ]));
+    expect(prerequisiteSnapshots).toEqual([{
+      knowledgePointVersionId: operationVersions.find((row) => row.version === 1)!.id,
+      prerequisiteKnowledgePointId: idByCanonicalId.get(rationalId),
     }]);
   });
 

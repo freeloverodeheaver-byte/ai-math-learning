@@ -7,11 +7,13 @@ import {
 } from "./import-workflow.js";
 import {
   SourceProvenanceConflictError,
+  ContentOwnershipConflictError,
   type ContentRepository,
   type ContentTransaction,
 } from "./repository.js";
 import {
   ContentVersionRegressionError,
+  ContentPayloadMutationError,
   type ContentService,
   type ContentTransactionHost,
 } from "./service.js";
@@ -106,6 +108,9 @@ export const registerContentRoutes: FastifyPluginAsync<ContentRoutesOptions> = a
         return reply.code(error.statusCode).send({ code: error.code });
       }
       if (error instanceof SourceProvenanceConflictError) {
+        return reply.code(error.statusCode).send({ code: error.code });
+      }
+      if (error instanceof ContentOwnershipConflictError || error instanceof ContentPayloadMutationError) {
         return reply.code(error.statusCode).send({ code: error.code });
       }
       return reply.code(500).send({ code: "INTERNAL_ERROR" });

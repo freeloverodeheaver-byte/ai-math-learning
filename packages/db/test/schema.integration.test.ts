@@ -14,6 +14,7 @@ import {
   knowledgePoints,
   knowledgePrerequisites,
   questionKnowledgePoints,
+  questionVersionKnowledgePoints,
   questionVersions,
   questions,
   sourceMergeProvenance,
@@ -33,6 +34,7 @@ const db = drizzle(pglite, {
     knowledgePoints,
     knowledgePrerequisites,
     questionKnowledgePoints,
+    questionVersionKnowledgePoints,
     questionVersions,
     questions,
     sourceMergeProvenance,
@@ -187,7 +189,7 @@ describe("foundation schema", () => {
     });
 
     await db.transaction(async (tx) => {
-      await tx.insert(questionVersions).values({
+      const [version] = await tx.insert(questionVersions).values({
         questionId: question.id,
         version: 1,
         stem: "Complete published question",
@@ -195,8 +197,9 @@ describe("foundation schema", () => {
         explanation: "It has both required references.",
         sourceId: source.id,
         reviewState: "published"
-      });
+      }).returning({ id: questionVersions.id });
       await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: point.id });
+      await tx.insert(questionVersionKnowledgePoints).values({ questionVersionId: version!.id, knowledgePointId: point.id });
     });
   });
 
@@ -212,7 +215,7 @@ describe("foundation schema", () => {
 
     await db.transaction(async (tx) => {
       await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: point.id });
-      await tx.insert(questionVersions).values({
+      const [version] = await tx.insert(questionVersions).values({
         questionId: question.id,
         version: 1,
         stem: "Published with one link",
@@ -220,14 +223,19 @@ describe("foundation schema", () => {
         explanation: "Removing the last link must fail.",
         sourceId: source.id,
         reviewState: "published"
-      });
+      }).returning({ id: questionVersions.id });
+      await tx.insert(questionVersionKnowledgePoints).values({ questionVersionId: version!.id, knowledgePointId: point.id });
     });
 
     await expect(
-      db.transaction((tx) => tx.delete(questionKnowledgePoints).where(and(
-        eq(questionKnowledgePoints.questionId, question.id),
-        eq(questionKnowledgePoints.knowledgePointId, point.id)
-      )))
+      db.transaction(async (tx) => {
+        const [version] = await tx.select({ id: questionVersions.id }).from(questionVersions)
+          .where(eq(questionVersions.questionId, question.id));
+        await tx.delete(questionVersionKnowledgePoints).where(and(
+          eq(questionVersionKnowledgePoints.questionVersionId, version!.id),
+          eq(questionVersionKnowledgePoints.knowledgePointId, point.id)
+        ));
+      })
     ).rejects.toThrow();
   });
 
@@ -249,7 +257,7 @@ describe("foundation schema", () => {
 
     await db.transaction(async (tx) => {
       await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: firstPoint.id });
-      await tx.insert(questionVersions).values({
+      const [version] = await tx.insert(questionVersions).values({
         questionId: question.id,
         version: 1,
         stem: "Published before replacement",
@@ -257,7 +265,8 @@ describe("foundation schema", () => {
         explanation: "Replacing links in one transaction is valid.",
         sourceId: source.id,
         reviewState: "published"
-      });
+      }).returning({ id: questionVersions.id });
+      await tx.insert(questionVersionKnowledgePoints).values({ questionVersionId: version!.id, knowledgePointId: firstPoint.id });
     });
 
     await expect(
@@ -340,6 +349,13 @@ describe("foundation schema", () => {
       .where(eq(contentEntityOwners.entityKey, `${canonicalId}-moved`));
     expect(movedOwner).toEqual([]);
 
+    const otherBundleId = `other-${randomUUID()}`;
+    await db.insert(contentBundles).values({ bundleId: otherBundleId });
+    await expect(db.update(contentEntityOwners).set({ bundleId: otherBundleId }).where(and(
+      eq(contentEntityOwners.entityType, "knowledge"),
+      eq(contentEntityOwners.entityKey, canonicalId)
+    ))).rejects.toThrow();
+
     const removableCanonicalId = `owner-removable-${randomUUID()}`;
     await insertOwnedKnowledgePoint({
       canonicalId: removableCanonicalId,
@@ -376,6 +392,12 @@ describe("foundation schema", () => {
       eq(contentEntityOwners.entityKey, externalKey)
     ));
     expect(survivingOwner).toHaveLength(1);
+    const otherBundleId = `other-${randomUUID()}`;
+    await db.insert(contentBundles).values({ bundleId: otherBundleId });
+    await expect(db.update(contentEntityOwners).set({ bundleId: otherBundleId }).where(and(
+      eq(contentEntityOwners.entityType, "question"),
+      eq(contentEntityOwners.entityKey, externalKey)
+    ))).rejects.toThrow();
   });
 });
 

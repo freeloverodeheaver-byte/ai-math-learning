@@ -118,6 +118,7 @@ describe("0000 to 0001 content ownership upgrade", () => {
       });
 
       await pglite.exec(await migration("0001_content_import_tracking.sql"));
+      await pglite.exec(await migration("0005_versioned_content_relationships.sql"));
 
       const mergedSources = await db.select().from(sources).where(eq(sources.label, sourceLabel));
       expect(mergedSources).toHaveLength(1);

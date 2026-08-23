@@ -84,6 +84,13 @@ export const knowledgePrerequisites = pgTable("knowledge_prerequisites", {
   check("knowledge_prerequisites_not_self", sql`${table.knowledgePointId} <> ${table.prerequisiteKnowledgePointId}`)
 ]);
 
+export const knowledgePointVersionPrerequisites = pgTable("knowledge_point_version_prerequisites", {
+  knowledgePointVersionId: uuid("knowledge_point_version_id").notNull().references(() => knowledgePointVersions.id, { onDelete: "cascade" }),
+  prerequisiteKnowledgePointId: uuid("prerequisite_knowledge_point_id").notNull().references(() => knowledgePoints.id, { onDelete: "restrict" })
+}, (table) => [
+  primaryKey({ name: "knowledge_point_version_prerequisites_pk", columns: [table.knowledgePointVersionId, table.prerequisiteKnowledgePointId] })
+]);
+
 export const questions = pgTable("questions", {
   id: uuid("id").defaultRandom().primaryKey(),
   externalKey: text("external_key").notNull().unique()
@@ -112,3 +119,10 @@ export const questionKnowledgePoints = pgTable("question_knowledge_points", {
   questionId: uuid("question_id").notNull().references(() => questions.id, { onDelete: "cascade" }),
   knowledgePointId: uuid("knowledge_point_id").notNull().references(() => knowledgePoints.id, { onDelete: "restrict" })
 }, (table) => [uniqueIndex("question_knowledge_points_unique").on(table.questionId, table.knowledgePointId)]);
+
+export const questionVersionKnowledgePoints = pgTable("question_version_knowledge_points", {
+  questionVersionId: uuid("question_version_id").notNull().references(() => questionVersions.id, { onDelete: "cascade" }),
+  knowledgePointId: uuid("knowledge_point_id").notNull().references(() => knowledgePoints.id, { onDelete: "restrict" })
+}, (table) => [
+  primaryKey({ name: "question_version_knowledge_points_pk", columns: [table.questionVersionId, table.knowledgePointId] })
+]);

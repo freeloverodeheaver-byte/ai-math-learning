@@ -7,7 +7,7 @@
     "db:migrate": "pnpm --filter @math/db migrate",
     "dev:deps": "docker compose -f infra/compose.yaml up -d postgres",
     "seed:mock": "pnpm --filter @math/api seed -- ../../seed/mock-content-grade-7-semester-1.json",
-    "test:foundation": "pnpm --filter @math/api test -- foundation.e2e.test.ts",
+    "test:foundation": "pnpm --filter @math/api exec vitest run foundation.e2e.test.ts",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "verify": "pnpm typecheck && pnpm test"

@@ -27,4 +27,16 @@ describe("loadConfig", () => {
       "DATABASE_URL is required when NODE_ENV is production",
     );
   });
+
+  it.each([
+    ["NODE_ENV", { NODE_ENV: "staging" }],
+    ["PORT zero", { PORT: "0" }],
+    ["PORT overflow", { PORT: "65536" }],
+    ["PORT non-integer", { PORT: "3.5" }],
+    ["boolean", { DEV_IDENTITY_ENABLED: "1" }],
+    ["database syntax", { DATABASE_URL: "not-a-url" }],
+    ["database scheme", { DATABASE_URL: "https://db.example.test/x" }],
+  ])("rejects invalid %s configuration", (_name, input) => {
+    expect(() => loadConfig(input)).toThrow();
+  });
 });

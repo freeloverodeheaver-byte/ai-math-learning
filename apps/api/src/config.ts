@@ -3,7 +3,9 @@ import { z } from "zod";
 const EnvironmentSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-    DATABASE_URL: z.string().url().optional(),
+    DATABASE_URL: z.string().url().refine((value) => /^postgres(?:ql)?:\/\//.test(value), {
+      message: "DATABASE_URL must use postgresql:// or postgres://",
+    }).optional(),
     PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
     DEV_IDENTITY_ENABLED: z
       .enum(["true", "false"])

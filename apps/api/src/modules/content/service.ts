@@ -31,6 +31,15 @@ export class ContentVersionRegressionError extends Error {
   }
 }
 
+export class ContentPayloadMutationError extends Error {
+  readonly code = "CONTENT_PAYLOAD_MUTATION";
+  readonly statusCode = 409;
+  constructor(bundleId: string, version: number) {
+    super(`Bundle ${bundleId} version ${version} has a different payload`);
+    this.name = "ContentPayloadMutationError";
+  }
+}
+
 export interface ContentTransactionHost {
   transaction<T>(callback: (transaction: ContentTransaction) => Promise<T>): Promise<T>;
 }
@@ -140,7 +149,7 @@ export class ContentService {
     }
     if (tracking.existing !== undefined) {
       if (tracking.existing.payloadHash !== hash) {
-        throw new Error(`Bundle ${bundle.bundleId} version ${bundle.version} has a different payload`);
+        throw new ContentPayloadMutationError(bundle.bundleId, bundle.version);
       }
       await this.upsertSources(bundle, transaction);
       return {
@@ -190,10 +199,10 @@ export class ContentService {
         result.unchanged += 1;
         continue;
       }
-      await this.repository.appendKnowledgeVersion(transaction, state.id, bundle.version, point);
+      const versionId = await this.repository.appendKnowledgeVersion(transaction, state.id, bundle.version, point);
       await this.repository.replaceKnowledgePrerequisites(
         transaction,
-        state.id,
+        versionId,
         point.prerequisites.map((canonicalId) => stableKnowledge.get(canonicalId)!.id)
       );
       if (state.created) result.createdKnowledge += 1;
@@ -210,10 +219,10 @@ export class ContentService {
         result.unchanged += 1;
         continue;
       }
-      await this.repository.appendQuestionVersion(transaction, state.id, bundle.version, question, sourceId);
+      const versionId = await this.repository.appendQuestionVersion(transaction, state.id, bundle.version, question, sourceId);
       await this.repository.replaceQuestionKnowledgeLinks(
         transaction,
-        state.id,
+        versionId,
         question.knowledgeCanonicalIds.map((canonicalId) => stableKnowledge.get(canonicalId)!.id)
       );
       if (state.created) result.createdQuestions += 1;

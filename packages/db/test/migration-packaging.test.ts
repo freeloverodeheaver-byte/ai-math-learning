@@ -74,6 +74,7 @@ describe("built migration package", () => {
 
     expect(tags).toContain("0002_access_invariants");
     expect(tags).toContain("0003_grant_identity_invariants");
+    expect(tags).toContain("0005_versioned_content_relationships");
     await expect(pglite.query(
       "select to_regclass('public.questions') as questions, to_regclass('public.content_bundles') as bundles, to_regclass('public.content_entity_owners') as owners, to_regclass('public.source_merge_provenance') as provenance"
     )).resolves.toMatchObject({
