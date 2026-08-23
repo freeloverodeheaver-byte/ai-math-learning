@@ -43,6 +43,86 @@ async function createBuiltGrantFixture(): Promise<{ grantId: string }> {
   return { grantId };
 }
 
+async function createBuiltRelationshipSnapshotFixture(): Promise<{
+  firstPointId: string;
+  secondPointId: string;
+  publishedKnowledgeVersionId: string;
+  publishedQuestionVersionId: string;
+}> {
+  pglite = await PGlite.create({ extensions: { pgcrypto } });
+  await applyJournaledMigrations(pglite, new URL("../dist/migrations/", import.meta.url));
+  const bundleId = `built-relationships-${randomUUID()}`;
+  const firstPointId = randomUUID();
+  const secondPointId = randomUUID();
+  const ownerPointId = randomUUID();
+  const questionId = randomUUID();
+  const sourceId = randomUUID();
+  const publishedKnowledgeVersionId = randomUUID();
+  const publishedQuestionVersionId = randomUUID();
+
+  await pglite.transaction(async (tx) => {
+    await tx.query("insert into content_bundles (bundle_id) values ($1)", [bundleId]);
+    await tx.query(
+      `insert into content_entity_owners (entity_type, entity_key, bundle_id) values
+        ('knowledge', $1, $4), ('knowledge', $2, $4), ('knowledge', $3, $4), ('question', $5, $4)`,
+      [
+        `built-relationship-first-${firstPointId}`,
+        `built-relationship-second-${secondPointId}`,
+        `built-relationship-owner-${ownerPointId}`,
+        bundleId,
+        `built-relationship-question-${questionId}`,
+      ],
+    );
+    await tx.query(
+      `insert into knowledge_points (id, canonical_id, name, grade, semester) values
+        ($1, $4, 'First point', 7, 1),
+        ($2, $5, 'Second point', 7, 1),
+        ($3, $6, 'Owner point', 7, 1)`,
+      [
+        firstPointId,
+        secondPointId,
+        ownerPointId,
+        `built-relationship-first-${firstPointId}`,
+        `built-relationship-second-${secondPointId}`,
+        `built-relationship-owner-${ownerPointId}`,
+      ],
+    );
+    await tx.query("insert into questions (id, external_key) values ($1, $2)", [
+      questionId,
+      `built-relationship-question-${questionId}`,
+    ]);
+    await tx.query("insert into sources (id, label) values ($1, $2)", [sourceId, `Built source ${sourceId}`]);
+    await tx.query(
+      `insert into knowledge_point_versions
+        (id, knowledge_point_id, version, name, grade, semester, review_state)
+       values ($1, $2, 1, 'Published owner point', 7, 1, 'draft')`,
+      [publishedKnowledgeVersionId, ownerPointId],
+    );
+    await tx.query(
+      "insert into knowledge_point_version_prerequisites (knowledge_point_version_id, prerequisite_knowledge_point_id) values ($1, $2)",
+      [publishedKnowledgeVersionId, firstPointId],
+    );
+    await tx.query("update knowledge_point_versions set review_state = 'published' where id = $1", [publishedKnowledgeVersionId]);
+    await tx.query("insert into question_knowledge_points (question_id, knowledge_point_id) values ($1, $2)", [
+      questionId,
+      firstPointId,
+    ]);
+    await tx.query(
+      `insert into question_versions
+        (id, question_id, version, stem, answer, explanation, source_id, review_state)
+       values ($1, $2, 1, 'Built snapshot question', 'Answer', 'Explanation', $3, 'draft')`,
+      [publishedQuestionVersionId, questionId, sourceId],
+    );
+    await tx.query(
+      "insert into question_version_knowledge_points (question_version_id, knowledge_point_id) values ($1, $2)",
+      [publishedQuestionVersionId, firstPointId],
+    );
+    await tx.query("update question_versions set review_state = 'published' where id = $1", [publishedQuestionVersionId]);
+  });
+
+  return { firstPointId, secondPointId, publishedKnowledgeVersionId, publishedQuestionVersionId };
+}
+
 afterEach(async () => {
   await pglite?.close();
   pglite = undefined;
@@ -152,5 +232,26 @@ describe("built migration package", () => {
         [grantId],
       );
     })).rejects.toThrow(/approved identity/i);
+  });
+
+  it("uses the built journal to lock relationship snapshots and their published lifecycle", async () => {
+    const fixture = await createBuiltRelationshipSnapshotFixture();
+
+    await expect(pglite!.query(
+      "update question_version_knowledge_points set knowledge_point_id = $1 where question_version_id = $2 and knowledge_point_id = $3",
+      [fixture.secondPointId, fixture.publishedQuestionVersionId, fixture.firstPointId],
+    )).rejects.toThrow();
+    await expect(pglite!.query(
+      "delete from knowledge_point_version_prerequisites where knowledge_point_version_id = $1 and prerequisite_knowledge_point_id = $2",
+      [fixture.publishedKnowledgeVersionId, fixture.firstPointId],
+    )).rejects.toThrow();
+    await expect(pglite!.query(
+      "update question_versions set review_state = 'draft' where id = $1",
+      [fixture.publishedQuestionVersionId],
+    )).rejects.toThrow();
+    await expect(pglite!.query(
+      "update knowledge_point_versions set review_state = 'in_review' where id = $1",
+      [fixture.publishedKnowledgeVersionId],
+    )).rejects.toThrow();
   });
 });

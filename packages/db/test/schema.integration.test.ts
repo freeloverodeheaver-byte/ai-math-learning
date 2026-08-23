@@ -13,6 +13,8 @@ import {
   contentEntityOwners,
   knowledgePoints,
   knowledgePrerequisites,
+  knowledgePointVersionPrerequisites,
+  knowledgePointVersions,
   questionKnowledgePoints,
   questionVersionKnowledgePoints,
   questionVersions,
@@ -178,7 +180,7 @@ describe("foundation schema", () => {
     ).rejects.toThrow();
   });
 
-  it("accepts published content when source and knowledge-point link exist at commit", async () => {
+  it("allows publishing content after its source and knowledge-point link exist", async () => {
     const [question] = await insertOwnedQuestion({ externalKey: `published-${randomUUID()}` });
     const [source] = await db.insert(sources).values({ label: `Source ${randomUUID()}` }).returning();
     const [point] = await insertOwnedKnowledgePoint({
@@ -196,10 +198,12 @@ describe("foundation schema", () => {
         answer: "Yes",
         explanation: "It has both required references.",
         sourceId: source.id,
-        reviewState: "published"
+        reviewState: "draft"
       }).returning({ id: questionVersions.id });
       await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: point.id });
       await tx.insert(questionVersionKnowledgePoints).values({ questionVersionId: version!.id, knowledgePointId: point.id });
+      await tx.update(questionVersions).set({ reviewState: "published" })
+        .where(eq(questionVersions.id, version!.id));
     });
   });
 
@@ -222,9 +226,11 @@ describe("foundation schema", () => {
         answer: "Yes",
         explanation: "Removing the last link must fail.",
         sourceId: source.id,
-        reviewState: "published"
+        reviewState: "draft"
       }).returning({ id: questionVersions.id });
       await tx.insert(questionVersionKnowledgePoints).values({ questionVersionId: version!.id, knowledgePointId: point.id });
+      await tx.update(questionVersions).set({ reviewState: "published" })
+        .where(eq(questionVersions.id, version!.id));
     });
 
     await expect(
@@ -264,9 +270,11 @@ describe("foundation schema", () => {
         answer: "Yes",
         explanation: "Replacing links in one transaction is valid.",
         sourceId: source.id,
-        reviewState: "published"
+        reviewState: "draft"
       }).returning({ id: questionVersions.id });
       await tx.insert(questionVersionKnowledgePoints).values({ questionVersionId: version!.id, knowledgePointId: firstPoint.id });
+      await tx.update(questionVersions).set({ reviewState: "published" })
+        .where(eq(questionVersions.id, version!.id));
     });
 
     await expect(
@@ -278,6 +286,170 @@ describe("foundation schema", () => {
         await tx.insert(questionKnowledgePoints).values({ questionId: question.id, knowledgePointId: secondPoint.id });
       })
     ).resolves.toBeUndefined();
+  });
+
+  it("rejects every direct mutation of a published question relationship snapshot", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
+    await expect(db.update(questionVersionKnowledgePoints)
+      .set({ knowledgePointId: fixture.secondPointId })
+      .where(and(
+        eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
+        eq(questionVersionKnowledgePoints.knowledgePointId, fixture.firstPointId)
+      ))).rejects.toThrow();
+    await expect(db.update(questionVersionKnowledgePoints)
+      .set({ questionVersionId: fixture.draftQuestionVersionId })
+      .where(and(
+        eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
+        eq(questionVersionKnowledgePoints.knowledgePointId, fixture.firstPointId)
+      ))).rejects.toThrow();
+    await expect(db.transaction(async (tx) => {
+      await tx.delete(questionVersionKnowledgePoints).where(and(
+        eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
+        eq(questionVersionKnowledgePoints.knowledgePointId, fixture.firstPointId)
+      ));
+      await tx.insert(questionVersionKnowledgePoints).values({
+        questionVersionId: fixture.publishedQuestionVersionId,
+        knowledgePointId: fixture.secondPointId
+      });
+    })).rejects.toThrow();
+    await expect(db.insert(questionVersionKnowledgePoints).values({
+      questionVersionId: fixture.publishedQuestionVersionId,
+      knowledgePointId: fixture.thirdPointId
+    })).rejects.toThrow();
+    await expect(db.update(questionVersionKnowledgePoints)
+      .set({ questionVersionId: fixture.publishedQuestionVersionId })
+      .where(and(
+        eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId),
+        eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdPointId)
+      ))).rejects.toThrow();
+    await expect(db.update(questionVersionKnowledgePoints)
+      .set({
+        questionVersionId: fixture.publishedQuestionVersionId,
+        knowledgePointId: fixture.secondPointId
+      })
+      .where(and(
+        eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId),
+        eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdPointId)
+      ))).rejects.toThrow();
+  });
+
+  it("rejects every direct mutation of a published knowledge prerequisite snapshot", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
+    await expect(db.update(knowledgePointVersionPrerequisites)
+      .set({ prerequisiteKnowledgePointId: fixture.secondPointId })
+      .where(and(
+        eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
+        eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.firstPointId)
+      ))).rejects.toThrow();
+    await expect(db.update(knowledgePointVersionPrerequisites)
+      .set({ knowledgePointVersionId: fixture.draftKnowledgeVersionId })
+      .where(and(
+        eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
+        eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.firstPointId)
+      ))).rejects.toThrow();
+    await expect(db.transaction(async (tx) => {
+      await tx.delete(knowledgePointVersionPrerequisites).where(and(
+        eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
+        eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.firstPointId)
+      ));
+      await tx.insert(knowledgePointVersionPrerequisites).values({
+        knowledgePointVersionId: fixture.publishedKnowledgeVersionId,
+        prerequisiteKnowledgePointId: fixture.secondPointId
+      });
+    })).rejects.toThrow();
+    await expect(db.insert(knowledgePointVersionPrerequisites).values({
+      knowledgePointVersionId: fixture.publishedKnowledgeVersionId,
+      prerequisiteKnowledgePointId: fixture.thirdPointId
+    })).rejects.toThrow();
+    await expect(db.update(knowledgePointVersionPrerequisites)
+      .set({ knowledgePointVersionId: fixture.publishedKnowledgeVersionId })
+      .where(and(
+        eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId),
+        eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.thirdPointId)
+      ))).rejects.toThrow();
+    await expect(db.update(knowledgePointVersionPrerequisites)
+      .set({
+        knowledgePointVersionId: fixture.publishedKnowledgeVersionId,
+        prerequisiteKnowledgePointId: fixture.secondPointId
+      })
+      .where(and(
+        eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId),
+        eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.thirdPointId)
+      ))).rejects.toThrow();
+  });
+
+  it("prevents a published version from being downgraded and keeps retired relationship snapshots locked", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
+    await expect(db.update(questionVersions)
+      .set({ reviewState: "draft" })
+      .where(eq(questionVersions.id, fixture.publishedQuestionVersionId))).rejects.toThrow();
+    await expect(db.update(knowledgePointVersions)
+      .set({ reviewState: "in_review" })
+      .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId))).rejects.toThrow();
+
+    await db.update(questionVersions)
+      .set({ reviewState: "retired" })
+      .where(eq(questionVersions.id, fixture.publishedQuestionVersionId));
+    await db.update(knowledgePointVersions)
+      .set({ reviewState: "retired" })
+      .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId));
+
+    await expect(db.delete(questionVersionKnowledgePoints).where(and(
+      eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
+      eq(questionVersionKnowledgePoints.knowledgePointId, fixture.firstPointId)
+    ))).rejects.toThrow();
+    await expect(db.delete(knowledgePointVersionPrerequisites).where(and(
+      eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
+      eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.firstPointId)
+    ))).rejects.toThrow();
+    await expect(db.update(questionVersions)
+      .set({ reviewState: "in_review" })
+      .where(eq(questionVersions.id, fixture.publishedQuestionVersionId))).rejects.toThrow();
+    await expect(db.update(knowledgePointVersions)
+      .set({ reviewState: "draft" })
+      .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId))).rejects.toThrow();
+  });
+
+  it("keeps draft and in-review relationship snapshots editable", async () => {
+    const fixture = await createRelationshipSnapshotFixture();
+
+    await expect(db.update(questionVersionKnowledgePoints)
+      .set({ knowledgePointId: fixture.secondPointId })
+      .where(and(
+        eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId),
+        eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdPointId)
+      ))).resolves.toMatchObject({ affectedRows: 1 });
+    await expect(db.update(knowledgePointVersionPrerequisites)
+      .set({ prerequisiteKnowledgePointId: fixture.secondPointId })
+      .where(and(
+        eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId),
+        eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.thirdPointId)
+      ))).resolves.toMatchObject({ affectedRows: 1 });
+    await db.update(questionVersions).set({ reviewState: "in_review" })
+      .where(eq(questionVersions.id, fixture.draftQuestionVersionId));
+    await db.update(knowledgePointVersions).set({ reviewState: "in_review" })
+      .where(eq(knowledgePointVersions.id, fixture.draftKnowledgeVersionId));
+    await expect(db.transaction(async (tx) => {
+      await tx.delete(questionVersionKnowledgePoints).where(and(
+        eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId),
+        eq(questionVersionKnowledgePoints.knowledgePointId, fixture.secondPointId)
+      ));
+      await tx.insert(questionVersionKnowledgePoints).values({
+        questionVersionId: fixture.draftQuestionVersionId,
+        knowledgePointId: fixture.thirdPointId
+      });
+      await tx.delete(knowledgePointVersionPrerequisites).where(and(
+        eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId),
+        eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.secondPointId)
+      ));
+      await tx.insert(knowledgePointVersionPrerequisites).values({
+        knowledgePointVersionId: fixture.draftKnowledgeVersionId,
+        prerequisiteKnowledgePointId: fixture.thirdPointId
+      });
+    })).resolves.toBeUndefined();
   });
 
   it("declares the named anti-self prerequisite check", () => {
@@ -400,6 +572,110 @@ describe("foundation schema", () => {
     ))).rejects.toThrow();
   });
 });
+
+interface RelationshipSnapshotFixture {
+  firstPointId: string;
+  secondPointId: string;
+  thirdPointId: string;
+  publishedQuestionVersionId: string;
+  draftQuestionVersionId: string;
+  publishedKnowledgeVersionId: string;
+  draftKnowledgeVersionId: string;
+}
+
+async function createRelationshipSnapshotFixture(): Promise<RelationshipSnapshotFixture> {
+  const [firstPoint] = await insertOwnedKnowledgePoint({
+    canonicalId: `relationship-first-${randomUUID()}`,
+    name: "First relationship point",
+    grade: 7,
+    semester: 1
+  });
+  const [secondPoint] = await insertOwnedKnowledgePoint({
+    canonicalId: `relationship-second-${randomUUID()}`,
+    name: "Second relationship point",
+    grade: 7,
+    semester: 1
+  });
+  const [thirdPoint] = await insertOwnedKnowledgePoint({
+    canonicalId: `relationship-third-${randomUUID()}`,
+    name: "Third relationship point",
+    grade: 7,
+    semester: 1
+  });
+  const [knowledgePoint] = await insertOwnedKnowledgePoint({
+    canonicalId: `relationship-owner-${randomUUID()}`,
+    name: "Relationship owner",
+    grade: 7,
+    semester: 1
+  });
+  const [question] = await insertOwnedQuestion({ externalKey: `relationship-question-${randomUUID()}` });
+  const [source] = await db.insert(sources).values({ label: `Relationship source ${randomUUID()}` }).returning();
+
+  const relationshipVersions = await db.transaction(async (tx) => {
+    const [publishedKnowledgeVersion] = await tx.insert(knowledgePointVersions).values({
+      knowledgePointId: knowledgePoint!.id,
+      version: 1,
+      name: "Published relationship owner",
+      grade: 7,
+      semester: 1,
+      reviewState: "draft"
+    }).returning({ id: knowledgePointVersions.id });
+    const [draftKnowledgeVersion] = await tx.insert(knowledgePointVersions).values({
+      knowledgePointId: knowledgePoint!.id,
+      version: 2,
+      name: "Draft relationship owner",
+      grade: 7,
+      semester: 1,
+      reviewState: "draft"
+    }).returning({ id: knowledgePointVersions.id });
+    await tx.insert(knowledgePointVersionPrerequisites).values([
+      { knowledgePointVersionId: publishedKnowledgeVersion!.id, prerequisiteKnowledgePointId: firstPoint!.id },
+      { knowledgePointVersionId: draftKnowledgeVersion!.id, prerequisiteKnowledgePointId: thirdPoint!.id }
+    ]);
+    await tx.update(knowledgePointVersions).set({ reviewState: "published" })
+      .where(eq(knowledgePointVersions.id, publishedKnowledgeVersion!.id));
+
+    await tx.insert(questionKnowledgePoints).values({ questionId: question!.id, knowledgePointId: firstPoint!.id });
+    const [publishedQuestionVersion] = await tx.insert(questionVersions).values({
+      questionId: question!.id,
+      version: 1,
+      stem: "Published relationship question",
+      answer: "Answer",
+      explanation: "Explanation",
+      sourceId: source!.id,
+      reviewState: "draft"
+    }).returning({ id: questionVersions.id });
+    const [draftQuestionVersion] = await tx.insert(questionVersions).values({
+      questionId: question!.id,
+      version: 2,
+      stem: "Draft relationship question",
+      answer: "Answer",
+      explanation: "Explanation",
+      sourceId: source!.id,
+      reviewState: "draft"
+    }).returning({ id: questionVersions.id });
+    await tx.insert(questionVersionKnowledgePoints).values([
+      { questionVersionId: publishedQuestionVersion!.id, knowledgePointId: firstPoint!.id },
+      { questionVersionId: draftQuestionVersion!.id, knowledgePointId: thirdPoint!.id }
+    ]);
+    await tx.update(questionVersions).set({ reviewState: "published" })
+      .where(eq(questionVersions.id, publishedQuestionVersion!.id));
+
+    return {
+      publishedKnowledgeVersionId: publishedKnowledgeVersion!.id,
+      draftKnowledgeVersionId: draftKnowledgeVersion!.id,
+      publishedQuestionVersionId: publishedQuestionVersion!.id,
+      draftQuestionVersionId: draftQuestionVersion!.id
+    };
+  });
+
+  return {
+    firstPointId: firstPoint!.id,
+    secondPointId: secondPoint!.id,
+    thirdPointId: thirdPoint!.id,
+    ...relationshipVersions
+  };
+}
 
 interface AccessFixture {
   classId: string;
