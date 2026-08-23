@@ -79,8 +79,10 @@ export const classMemberships = pgTable("class_memberships", {
 
 // Migration 0002 also installs deferred cross-table integrity triggers. Drizzle
 // cannot express those triggers: an unrevoked grant requires this membership to
-// be active and to reference the same student, and leaving active requires every
-// grant to be revoked in the same transaction.
+// be active and to reference the same student; its membership, student, and scope
+// form an immutable approved identity; revocation is irreversible; and leaving
+// active requires every grant to be revoked in the same transaction. Migration
+// 0003 reapplies the grant rules for databases that recorded an earlier 0002.
 export const dataSharingGrants = pgTable("data_sharing_grants", {
   id: uuid("id").defaultRandom().primaryKey(),
   classMembershipId: uuid("class_membership_id").notNull().references(() => classMemberships.id, { onDelete: "cascade" }),

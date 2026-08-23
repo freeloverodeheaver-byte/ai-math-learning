@@ -1,9 +1,47 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import { pgcrypto } from "@electric-sql/pglite/contrib/pgcrypto";
 import { applyJournaledMigrations } from "./migration-test-utils.js";
 
 let pglite: PGlite | undefined;
+
+async function createBuiltGrantFixture(): Promise<{ grantId: string }> {
+  pglite = await PGlite.create({ extensions: { pgcrypto } });
+  await applyJournaledMigrations(pglite, new URL("../dist/migrations/", import.meta.url));
+  const studentUserId = randomUUID();
+  const teacherUserId = randomUUID();
+  const studentProfileId = randomUUID();
+  const teacherProfileId = randomUUID();
+  const classId = randomUUID();
+  const membershipId = randomUUID();
+  const grantId = randomUUID();
+  await pglite.query(
+    "insert into users (id, external_subject) values ($1, $2), ($3, $4)",
+    [studentUserId, `built-student-${studentUserId}`, teacherUserId, `built-teacher-${teacherUserId}`],
+  );
+  await pglite.query(
+    "insert into student_profiles (id, user_id, display_name, grade, semester) values ($1, $2, 'Built student', 7, 1)",
+    [studentProfileId, studentUserId],
+  );
+  await pglite.query(
+    "insert into teacher_profiles (id, user_id, display_name) values ($1, $2, 'Built teacher')",
+    [teacherProfileId, teacherUserId],
+  );
+  await pglite.query(
+    "insert into classes (id, teacher_profile_id, name, subject, invite_code) values ($1, $2, 'Built class', 'math', $3)",
+    [classId, teacherProfileId, `built-invite-${classId}`],
+  );
+  await pglite.query(
+    "insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values ($1, $2, $3, 'active', now())",
+    [membershipId, classId, studentProfileId],
+  );
+  await pglite.query(
+    "insert into data_sharing_grants (id, class_membership_id, student_profile_id, scope) values ($1, $2, $3, 'learning_summary')",
+    [grantId, membershipId, studentProfileId],
+  );
+  return { grantId };
+}
 
 afterEach(async () => {
   await pglite?.close();
@@ -16,6 +54,7 @@ describe("built migration package", () => {
     const tags = await applyJournaledMigrations(pglite, new URL("../dist/migrations/", import.meta.url));
 
     expect(tags).toContain("0002_access_invariants");
+    expect(tags).toContain("0003_grant_identity_invariants");
     await expect(pglite.query(
       "select to_regclass('public.questions') as questions, to_regclass('public.content_bundles') as bundles, to_regclass('public.content_entity_owners') as owners, to_regclass('public.source_merge_provenance') as provenance"
     )).resolves.toMatchObject({
@@ -73,5 +112,25 @@ describe("built migration package", () => {
       "classes_active_grants_owner_integrity",
       "data_sharing_grants_active_integrity"
     ]);
+  });
+
+  it("uses the built journal to keep grant revocation irreversible", async () => {
+    const { grantId } = await createBuiltGrantFixture();
+
+    await expect(pglite!.transaction(async (tx) => {
+      await tx.query("update data_sharing_grants set revoked_at = now() where id = $1", [grantId]);
+      await tx.query("update data_sharing_grants set revoked_at = null where id = $1", [grantId]);
+    })).rejects.toThrow(/revocation/i);
+  });
+
+  it("uses the built journal to keep an unrevoked grant's approved scope immutable", async () => {
+    const { grantId } = await createBuiltGrantFixture();
+
+    await expect(pglite!.transaction(async (tx) => {
+      await tx.query(
+        "update data_sharing_grants set scope = 'shared_personal_content' where id = $1",
+        [grantId],
+      );
+    })).rejects.toThrow(/approved identity/i);
   });
 });

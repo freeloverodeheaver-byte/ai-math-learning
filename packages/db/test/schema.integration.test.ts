@@ -588,10 +588,66 @@ describe("access migration invariants", () => {
     await expect(pglite.transaction(async (tx) => {
       await tx.query("update data_sharing_grants set revoked_at = now() where id = $1", [grantId]);
       await tx.query(
-        "update data_sharing_grants set class_membership_id = $1, student_profile_id = $2 where id = $3",
+        "update data_sharing_grants set class_membership_id = $1, student_profile_id = $2, scope = 'shared_personal_content' where id = $3",
         [targetMembershipId, fixture.otherStudentProfileId, grantId],
       );
     })).resolves.toBeUndefined();
+  });
+
+  it("rejects restoring a revoked grant after rebinding it", async () => {
+    const fixture = await createAccessFixture();
+    const sourceMembershipId = randomUUID();
+    const targetMembershipId = randomUUID();
+    const grantId = randomUUID();
+    await pglite.transaction(async (tx) => {
+      await tx.query(
+        `insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values
+          ($1, $3, $4, 'active', now()), ($2, $3, $5, 'active', now())`,
+        [
+          sourceMembershipId,
+          targetMembershipId,
+          fixture.classId,
+          fixture.studentProfileId,
+          fixture.otherStudentProfileId,
+        ],
+      );
+      await tx.query(
+        "insert into data_sharing_grants (id, class_membership_id, student_profile_id, scope) values ($1, $2, $3, 'learning_summary')",
+        [grantId, sourceMembershipId, fixture.studentProfileId],
+      );
+    });
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query("update data_sharing_grants set revoked_at = now() where id = $1", [grantId]);
+      await tx.query(
+        "update data_sharing_grants set class_membership_id = $1, student_profile_id = $2 where id = $3",
+        [targetMembershipId, fixture.otherStudentProfileId, grantId],
+      );
+      await tx.query("update data_sharing_grants set revoked_at = null where id = $1", [grantId]);
+    })).rejects.toThrow(/revocation/i);
+  });
+
+  it("rejects changing the approved scope of an unrevoked grant", async () => {
+    const fixture = await createAccessFixture();
+    const membershipId = randomUUID();
+    const grantId = randomUUID();
+    await pglite.transaction(async (tx) => {
+      await tx.query(
+        "insert into class_memberships (id, class_id, student_profile_id, state, resolved_at) values ($1, $2, $3, 'active', now())",
+        [membershipId, fixture.classId, fixture.studentProfileId],
+      );
+      await tx.query(
+        "insert into data_sharing_grants (id, class_membership_id, student_profile_id, scope) values ($1, $2, $3, 'learning_summary')",
+        [grantId, membershipId, fixture.studentProfileId],
+      );
+    });
+
+    await expect(pglite.transaction(async (tx) => {
+      await tx.query(
+        "update data_sharing_grants set scope = 'shared_personal_content' where id = $1",
+        [grantId],
+      );
+    })).rejects.toThrow(/approved identity/i);
   });
 
   it("prevents transferring an approved class to another teacher until grants are revoked", async () => {
