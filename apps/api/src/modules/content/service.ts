@@ -77,7 +77,10 @@ function canonicalPayload(bundle: ContentBundle): string {
         explanation: question.explanation,
         knowledgeCanonicalIds: sorted(question.knowledgeCanonicalIds),
         difficulty: question.difficulty,
-        sourceLabel: question.sourceLabel
+        sourceLabel: question.sourceLabel,
+        sourceKind: question.sourceKind,
+        sourceReference: question.sourceReference,
+        sourceUsageBasis: question.sourceUsageBasis
       }))
       .sort((left, right) => compareStrings(left.externalKey, right.externalKey))
   });
@@ -102,6 +105,9 @@ function questionChanged(input: QuestionInput, state: StableQuestionState): bool
     || state.latest.explanation !== input.explanation
     || state.latest.difficulty !== input.difficulty
     || state.latest.sourceLabel !== input.sourceLabel
+    || state.latest.sourceKind !== input.sourceKind
+    || state.latest.sourceReference !== input.sourceReference
+    || state.latest.sourceUsageBasis !== input.sourceUsageBasis
     || !sameStrings(state.latest.knowledgeCanonicalIds, input.knowledgeCanonicalIds);
 }
 
@@ -136,6 +142,7 @@ export class ContentService {
       if (tracking.existing.payloadHash !== hash) {
         throw new Error(`Bundle ${bundle.bundleId} version ${bundle.version} has a different payload`);
       }
+      await this.upsertSources(bundle, transaction);
       return {
         createdKnowledge: 0,
         createdQuestions: 0,
@@ -194,10 +201,7 @@ export class ContentService {
     }
 
     // Acquire source unique-index locks in one global order across all bundles.
-    const sourceIds = new Map<string, string>();
-    for (const sourceLabel of sorted([...new Set(bundle.questions.map((question) => question.sourceLabel))])) {
-      sourceIds.set(sourceLabel, await this.repository.upsertSource(transaction, sourceLabel));
-    }
+    const sourceIds = await this.upsertSources(bundle, transaction);
 
     for (const question of bundle.questions) {
       const sourceId = sourceIds.get(question.sourceLabel)!;
@@ -217,5 +221,23 @@ export class ContentService {
     }
 
     return result;
+  }
+
+  private async upsertSources(
+    bundle: ContentBundle,
+    transaction: ContentTransaction
+  ): Promise<Map<string, string>> {
+    const sourceIds = new Map<string, string>();
+    const sourceByLabel = new Map(bundle.questions.map((question) => [question.sourceLabel, question]));
+    for (const sourceLabel of sorted([...sourceByLabel.keys()])) {
+      const question = sourceByLabel.get(sourceLabel)!;
+      sourceIds.set(sourceLabel, await this.repository.upsertSource(transaction, {
+        label: sourceLabel,
+        kind: question.sourceKind,
+        reference: question.sourceReference,
+        usageBasis: question.sourceUsageBasis
+      }));
+    }
+    return sourceIds;
   }
 }

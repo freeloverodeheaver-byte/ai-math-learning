@@ -88,3 +88,88 @@ Observed focused GREEN evidence:
 - Native PostgreSQL behavior remains unverified locally because `TEST_DATABASE_URL` is unavailable. PGlite covers the contract, but native PostgreSQL remains the release gate required by earlier tasks and this task.
 - The pre-existing access-layer alias `AccessTransaction = PgDatabase<any, any, any>` is intentionally untouched and remains a named Task 7 concern. Task 6's content and audit transaction boundaries are zero-`any`.
 - Migration `0004` enforces the approved stronger append-only invariant for every database user. Future retention or repair tooling will need an explicitly privileged maintenance path rather than ordinary application DML.
+
+## Fix R1 — Important review findings
+
+Review source: `task-6-review.md` at head `98c3291`. This fix addresses I1, I2, and I3 only; review Minors M1 and M2 were explicitly excluded from this round.
+
+### I1: effective bundle-revision publication
+
+- `publishBundleRevision` now receives the parsed bundle and, for every payload key, selects the latest owned entity version whose version is `<= bundle.version`.
+- Each effective knowledge/question row must exist and return exactly one row from the publication update; otherwise the transaction fails before `content.bundle.published` is appended.
+- The published audit metadata records verified effective member counts.
+- Regression coverage includes Task-3 direct draft v1 followed by unchanged route v2, mixed unchanged knowledge/changed question v2, an unrelated same-numbered bundle revision, already-published replay, and failure rollback without a false audit.
+
+RED evidence:
+
+```text
+pnpm --filter @math/api test -- operator-content-api.test.ts
+```
+
+The direct draft-v1/unchanged-v2 test received `{ version: 1, reviewState: "draft" }` instead of `published`; 1 failed and 103 passed.
+
+GREEN evidence after effective-version publication and companion cases: API focused run passed 105 tests.
+
+### I2: non-empty question relationships
+
+- `QuestionInputSchema.knowledgeCanonicalIds` now requires at least one canonical ID.
+- Both operator routes preserve the Zod `path`, `code`, and `message` in structured 422 responses.
+- The route test verifies validate/import both reject before invoking the transaction host and leave bundle/audit state empty.
+
+RED evidence:
+
+- Contracts: empty relationship parsed successfully instead of failing; 1 failed and 10 passed.
+- API: validation returned 200 instead of 422; 1 failed and 105 passed.
+
+GREEN evidence: contracts passed 11 tests and API passed 106 tests at the I2 gate.
+
+### I3: substantive content and source provenance
+
+- Added required `sourceKind`, `sourceReference`, and `sourceUsageBasis` fields. `sourceKind` supports `simulated`, `original`, `licensed`, `public_domain`, and `ai_generated` in the shared draft/import schema.
+- External substantive strings are trimmed and must remain nonblank, including answer, explanation, source label/reference/usage basis, stem, stable keys, and names.
+- One label cannot carry conflicting provenance inside a bundle. Existing source rows are reused only when reference, kind, and usage basis match; conflicts raise typed `SOURCE_PROVENANCE_CONFLICT` and roll back.
+- Source reference is stored in `sources.reference`; kind and usage basis are stored in source metadata.
+- Canonical payload hashing and question change detection include every provenance field. Idempotent replay also revalidates the persisted source provenance before returning unchanged.
+- The operator publishable schema rejects `ai_generated` on both validate and import with a structured 422 before any transaction, while `ContentBundleSchema` continues to represent AI-generated draft content.
+- The checked-in seed is schema-valid version 2 with explicit simulated provenance and a new v2 label/reference, avoiding a same-version hash mutation or silent rewrite of the legacy label.
+
+RED evidence:
+
+- Schema gate: provenance keys were unrecognized and whitespace fields produced no field-level `too_small` issues; 2 failed and 11 passed.
+- Persistence gate after fixture cleanup: stored provenance was `reference: null, metadata: {}`, existing-label conflicts imported successfully, and provenance-only same-version changes were treated as unchanged; 3 failed and 106 passed.
+- Publish gate: AI validation returned 200, AI import returned 500, and an existing-source conflict returned generic 500 instead of typed 409; 3 failed and 111 passed.
+- Self-review replay probe: a source mutated after first import was not revalidated on idempotent replay; 1 failed and 115 passed.
+
+Focused GREEN evidence:
+
+- Contracts: 1 file, 15 tests passed.
+- API content/import/operator/upgrade/seed coverage: 7 files, 116 tests passed.
+
+### Fix R1 final verification
+
+- `pnpm test` — exit 0: contracts 15, database 29, API 116; 10 files and 160 tests total.
+- `pnpm typecheck` — exit 0 for contracts, database, and API.
+- `pnpm build` — exit 0 for contracts, database migration packaging, and API.
+- `git diff --check` — exit 0.
+- `TEST_DATABASE_URL` was unset; native PostgreSQL was not run or claimed and remains review Minor M1/release-gate work.
+
+Fix files:
+
+- `packages/contracts/src/content.ts`
+- `packages/contracts/test/content.test.ts`
+- `apps/api/src/modules/content/repository.ts`
+- `apps/api/src/modules/content/service.ts`
+- `apps/api/src/modules/content/routes.ts`
+- `apps/api/test/content-import.test.ts`
+- `apps/api/test/content-upgrade.test.ts`
+- `apps/api/test/operator-content-api.test.ts`
+- `apps/api/test/seed.test.ts`
+- `seed/mock-content-grade-7-semester-1.json`
+
+Fix self-review:
+
+- Removing the `<= bundle.version` effective lookup breaks unchanged/mixed revision tests.
+- Omitting any payload member publication or recording a false audit breaks effective-state/audit/rollback assertions.
+- Allowing an empty relationship, blank answer, or AI source breaks structured 422 and zero-transaction tests.
+- Omitting provenance persistence, hash inputs, immutable conflict comparison, or replay validation breaks focused source tests.
+- Content/audit transaction types remain zero-`any`; the pre-existing access alias remains the previously disclosed Task 7 concern.

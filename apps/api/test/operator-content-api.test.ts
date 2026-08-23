@@ -24,7 +24,11 @@ import { buildApp } from "../src/app.js";
 import { databaseRouteOptions } from "../src/composition.js";
 import { AuditRepository } from "../src/modules/audit/repository.js";
 import { AuditService, type AuditEventInput } from "../src/modules/audit/service.js";
-import { ContentRepository, type ContentTransaction } from "../src/modules/content/repository.js";
+import {
+  ContentRepository,
+  type ContentTransaction,
+  type PublicationResult,
+} from "../src/modules/content/repository.js";
 import type { ContentRoutesOptions } from "../src/modules/content/routes.js";
 import { ContentService, type ImportResult } from "../src/modules/content/service.js";
 import { DevIdentityProvider } from "../src/modules/identity/dev-identity-provider.js";
@@ -47,6 +51,9 @@ const bundle: ContentBundle = {
     knowledgeCanonicalIds: ["g7s1.rational"],
     difficulty: 1,
     sourceLabel: "Operator API fixture",
+    sourceKind: "simulated",
+    sourceReference: "fixture:operator-api",
+    sourceUsageBasis: "synthetic test fixture",
   }],
 };
 
@@ -302,7 +309,11 @@ describe("operator content API", () => {
         actorUserId: operatorUserId,
         action: "content.bundle.published",
         subjectId: importedBundle.bundleId,
-        metadata: { bundleId: importedBundle.bundleId, version: 1 },
+        metadata: {
+          bundleId: importedBundle.bundleId,
+          version: 1,
+          result: { knowledgePoints: 1, questions: 1 },
+        },
       },
     ]));
   });
@@ -388,6 +399,202 @@ describe("operator content API", () => {
     expect(questionRows).toEqual([]);
   });
 
+  it("returns structured 422 without a transaction or writes for an empty question relationship", async () => {
+    let transactionCalls = 0;
+    const transactionHost: NonNullable<ContentRoutesOptions["database"]> = {
+      transaction: async (callback) => {
+        transactionCalls += 1;
+        return database.transaction(callback);
+      },
+    };
+    const app = await buildApp({
+      actorPlugin: {
+        provider: new DevIdentityProvider(),
+        nodeEnv: "test",
+        devIdentityEnabled: true,
+      },
+      contentRoutes: {
+        database: transactionHost,
+        contentService,
+        contentRepository,
+        auditService,
+      },
+    });
+    apps.push(app);
+    const incomplete = createUniqueBundle("empty-relationship");
+    const payload = {
+      ...incomplete,
+      questions: [{ ...incomplete.questions[0], knowledgeCanonicalIds: [] }],
+    };
+
+    const validation = await app.inject({
+      method: "POST",
+      url: "/operator/content/bundles/validate",
+      headers: operatorHeaders,
+      payload,
+    });
+    const imported = await app.inject({
+      method: "POST",
+      url: "/operator/content/bundles/import",
+      headers: operatorHeaders,
+      payload,
+    });
+
+    const expectedIssue = {
+      path: ["questions", 0, "knowledgeCanonicalIds"],
+      code: "too_small",
+      message: expect.any(String),
+    };
+    expect(validation.statusCode).toBe(422);
+    expect(validation.json()).toEqual({
+      code: "INVALID_CONTENT_BUNDLE",
+      issues: [expectedIssue],
+    });
+    expect(imported.statusCode).toBe(422);
+    expect(imported.json()).toEqual({
+      code: "INVALID_CONTENT_BUNDLE",
+      issues: [expectedIssue],
+    });
+    expect(transactionCalls).toBe(0);
+    expect(await database.select().from(contentBundles)
+      .where(eq(contentBundles.bundleId, incomplete.bundleId))).toEqual([]);
+    expect(await database.select().from(auditEvents)
+      .where(eq(auditEvents.subjectId, incomplete.bundleId))).toEqual([]);
+  });
+
+  it.each([
+    ["validate", "/operator/content/bundles/validate"],
+    ["import", "/operator/content/bundles/import"],
+  ])("rejects AI-generated provenance on %s without starting a transaction", async (_name, url) => {
+    let transactionCalls = 0;
+    const transactionHost: NonNullable<ContentRoutesOptions["database"]> = {
+      transaction: async (callback) => {
+        transactionCalls += 1;
+        return database.transaction(callback);
+      },
+    };
+    const app = await buildApp({
+      actorPlugin: {
+        provider: new DevIdentityProvider(),
+        nodeEnv: "test",
+        devIdentityEnabled: true,
+      },
+      contentRoutes: {
+        database: transactionHost,
+        contentService,
+        contentRepository,
+        auditService,
+      },
+    });
+    apps.push(app);
+    const aiBundle = createUniqueBundle(`ai-${_name}`);
+    const payload = {
+      ...aiBundle,
+      questions: [{ ...aiBundle.questions[0], sourceKind: "ai_generated" }],
+    };
+
+    const response = await app.inject({
+      method: "POST",
+      url,
+      headers: operatorHeaders,
+      payload,
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toEqual({
+      code: "INVALID_CONTENT_BUNDLE",
+      issues: [{
+        path: ["questions", 0, "sourceKind"],
+        code: "custom",
+        message: "AI-generated content cannot be published",
+      }],
+    });
+    expect(transactionCalls).toBe(0);
+    expect(await database.select().from(contentBundles)
+      .where(eq(contentBundles.bundleId, aiBundle.bundleId))).toEqual([]);
+    expect(await database.select().from(auditEvents)
+      .where(eq(auditEvents.subjectId, aiBundle.bundleId))).toEqual([]);
+  });
+
+  it.each([
+    ["validate", "/operator/content/bundles/validate"],
+    ["import", "/operator/content/bundles/import"],
+  ])("rejects blank substantive content on %s without starting a transaction", async (_name, url) => {
+    let transactionCalls = 0;
+    const transactionHost: NonNullable<ContentRoutesOptions["database"]> = {
+      transaction: async (callback) => {
+        transactionCalls += 1;
+        return database.transaction(callback);
+      },
+    };
+    const app = await buildApp({
+      actorPlugin: {
+        provider: new DevIdentityProvider(),
+        nodeEnv: "test",
+        devIdentityEnabled: true,
+      },
+      contentRoutes: {
+        database: transactionHost,
+        contentService,
+        contentRepository,
+        auditService,
+      },
+    });
+    apps.push(app);
+    const blankBundle = createUniqueBundle(`blank-${_name}`);
+    const payload = {
+      ...blankBundle,
+      questions: [{ ...blankBundle.questions[0], answer: "   " }],
+    };
+
+    const response = await app.inject({
+      method: "POST",
+      url,
+      headers: operatorHeaders,
+      payload,
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toEqual({
+      code: "INVALID_CONTENT_BUNDLE",
+      issues: [expect.objectContaining({
+        path: ["questions", 0, "answer"],
+        code: "too_small",
+        message: expect.any(String),
+      })],
+    });
+    expect(transactionCalls).toBe(0);
+  });
+
+  it("returns a typed conflict without audit or content writes for existing source provenance mismatch", async () => {
+    const base = createUniqueBundle("source-conflict-route");
+    const sourceLabel = `Route conflict ${randomUUID()}`;
+    const conflictBundle: ContentBundle = {
+      ...base,
+      questions: [{ ...base.questions[0]!, sourceLabel }],
+    };
+    await database.insert(sources).values({
+      label: sourceLabel,
+      reference: "existing-reference",
+      metadata: { kind: "licensed", usageBasis: "existing license" },
+    });
+    const app = await buildDatabaseApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/operator/content/bundles/import",
+      headers: operatorHeaders,
+      payload: conflictBundle,
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ code: "SOURCE_PROVENANCE_CONFLICT" });
+    expect(await database.select().from(contentBundles)
+      .where(eq(contentBundles.bundleId, conflictBundle.bundleId))).toEqual([]);
+    expect(await database.select().from(auditEvents)
+      .where(eq(auditEvents.subjectId, conflictBundle.bundleId))).toEqual([]);
+  });
+
   it("keeps another bundle's same-numbered revision draft", async () => {
     const foreign = createUniqueBundle("foreign-revision", 2);
     const actor: Actor = { userId: operatorUserId, roles: ["operator"] };
@@ -408,6 +615,79 @@ describe("operator content API", () => {
       .innerJoin(questions, eq(questionVersions.questionId, questions.id))
       .where(eq(questions.externalKey, foreign.questions[0]!.externalKey));
     expect(foreignStates).toEqual([{ reviewState: "draft" }]);
+  });
+
+  it("publishes the effective prior versions for an unchanged newer bundle revision", async () => {
+    const versionOne = createUniqueBundle("effective-unchanged");
+    const actor: Actor = { userId: operatorUserId, roles: ["operator"] };
+    await contentService.importBundle(versionOne, actor);
+    const app = await buildDatabaseApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/operator/content/bundles/import",
+      headers: operatorHeaders,
+      payload: { ...versionOne, version: 2 },
+    });
+
+    expect(response.statusCode).toBe(201);
+    const effectiveKnowledge = await database.select({
+      version: knowledgePointVersions.version,
+      reviewState: knowledgePointVersions.reviewState,
+    }).from(knowledgePointVersions)
+      .innerJoin(knowledgePoints, eq(knowledgePointVersions.knowledgePointId, knowledgePoints.id))
+      .where(eq(knowledgePoints.canonicalId, versionOne.knowledgePoints[0]!.canonicalId));
+    const effectiveQuestions = await database.select({
+      version: questionVersions.version,
+      reviewState: questionVersions.reviewState,
+    }).from(questionVersions)
+      .innerJoin(questions, eq(questionVersions.questionId, questions.id))
+      .where(eq(questions.externalKey, versionOne.questions[0]!.externalKey));
+    expect(effectiveKnowledge).toEqual([{ version: 1, reviewState: "published" }]);
+    expect(effectiveQuestions).toEqual([{ version: 1, reviewState: "published" }]);
+
+    const publishedAudits = await database.select().from(auditEvents)
+      .where(eq(auditEvents.subjectId, versionOne.bundleId));
+    expect(publishedAudits.filter((event) => event.action === "content.bundle.published"))
+      .toHaveLength(1);
+  });
+
+  it("publishes unchanged prior members and changed current members in a mixed revision", async () => {
+    const versionOne = createUniqueBundle("effective-mixed");
+    const actor: Actor = { userId: operatorUserId, roles: ["operator"] };
+    await contentService.importBundle(versionOne, actor);
+    const versionTwo: ContentBundle = {
+      ...versionOne,
+      version: 2,
+      questions: [{ ...versionOne.questions[0]!, stem: "Changed in revision two" }],
+    };
+    const app = await buildDatabaseApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/operator/content/bundles/import",
+      headers: operatorHeaders,
+      payload: versionTwo,
+    });
+
+    expect(response.statusCode).toBe(201);
+    const knowledgeStates = await database.select({
+      version: knowledgePointVersions.version,
+      reviewState: knowledgePointVersions.reviewState,
+    }).from(knowledgePointVersions)
+      .innerJoin(knowledgePoints, eq(knowledgePointVersions.knowledgePointId, knowledgePoints.id))
+      .where(eq(knowledgePoints.canonicalId, versionOne.knowledgePoints[0]!.canonicalId));
+    const questionStates = await database.select({
+      version: questionVersions.version,
+      reviewState: questionVersions.reviewState,
+    }).from(questionVersions)
+      .innerJoin(questions, eq(questionVersions.questionId, questions.id))
+      .where(eq(questions.externalKey, versionOne.questions[0]!.externalKey));
+    expect(knowledgeStates).toEqual([{ version: 1, reviewState: "published" }]);
+    expect(questionStates).toEqual(expect.arrayContaining([
+      { version: 1, reviewState: "draft" },
+      { version: 2, reviewState: "published" },
+    ]));
   });
 
   it("replays an identical request idempotently while auditing every request", async () => {
@@ -449,6 +729,20 @@ describe("operator content API", () => {
     expect(knowledgeVersionCount!.value).toBe(1);
     expect(questionVersionCount!.value).toBe(1);
     expect(audits!.value).toBe(4);
+    const publishedStates = await Promise.all([
+      database.select({ reviewState: knowledgePointVersions.reviewState })
+        .from(knowledgePointVersions)
+        .innerJoin(knowledgePoints, eq(knowledgePointVersions.knowledgePointId, knowledgePoints.id))
+        .where(eq(knowledgePoints.canonicalId, replay.knowledgePoints[0]!.canonicalId)),
+      database.select({ reviewState: questionVersions.reviewState })
+        .from(questionVersions)
+        .innerJoin(questions, eq(questionVersions.questionId, questions.id))
+        .where(eq(questions.externalKey, replay.questions[0]!.externalKey)),
+    ]);
+    expect(publishedStates).toEqual([
+      [{ reviewState: "published" }],
+      [{ reviewState: "published" }],
+    ]);
   });
 
   it("rolls back all import and publication state when audit append fails", async () => {
@@ -496,9 +790,8 @@ describe("operator content API", () => {
     class FailingPublicationRepository extends ContentRepository {
       override async publishBundleRevision(
         _transaction: ContentTransaction,
-        _bundleId: string,
-        _version: number,
-      ): Promise<void> {
+        _bundle: ContentBundle,
+      ): Promise<PublicationResult> {
         throw new Error("publication unavailable");
       }
     }
@@ -539,11 +832,10 @@ describe("operator content API", () => {
     class RecordingRepository extends ContentRepository {
       override async publishBundleRevision(
         transaction: ContentTransaction,
-        bundleId: string,
-        version: number,
-      ): Promise<void> {
+        input: ContentBundle,
+      ) {
         seen.push(transaction);
-        return super.publishBundleRevision(transaction, bundleId, version);
+        return super.publishBundleRevision(transaction, input);
       }
     }
     class RecordingService extends ContentService {

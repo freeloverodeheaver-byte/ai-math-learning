@@ -223,7 +223,10 @@ describe("0000 to 0001 content ownership upgrade", () => {
           explanation: "Attempted mutation",
           knowledgeCanonicalIds: [point!.canonicalId],
           difficulty: 2,
-          sourceLabel: `Foreign ${sourceLabel}`
+          sourceLabel: `Foreign ${sourceLabel}`,
+          sourceKind: "simulated",
+          sourceReference: `fixture:${suffix}`,
+          sourceUsageBasis: "synthetic test fixture"
         }]
       });
 

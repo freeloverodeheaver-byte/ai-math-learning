@@ -20,7 +20,11 @@ import {
 import { and, count, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ContentRepository, type ContentTransaction } from "../src/modules/content/repository.js";
+import {
+  ContentRepository,
+  type ContentTransaction,
+  type SourceProvenanceInput,
+} from "../src/modules/content/repository.js";
 import { ContentService } from "../src/modules/content/service.js";
 
 const schema = {
@@ -44,9 +48,12 @@ const service = new ContentService(db, repository);
 class RecordingContentRepository extends ContentRepository {
   readonly sourceLabels: string[] = [];
 
-  override async upsertSource(transaction: ContentTransaction, label: string): Promise<string> {
-    this.sourceLabels.push(label);
-    return super.upsertSource(transaction, label);
+  override async upsertSource(
+    transaction: ContentTransaction,
+    input: SourceProvenanceInput,
+  ): Promise<string> {
+    this.sourceLabels.push(input.label);
+    return super.upsertSource(transaction, input);
   }
 }
 
@@ -78,7 +85,10 @@ function createBundle(suffix = randomUUID()): ContentBundle {
         explanation: "异号相加，取绝对值较大数的符号。",
         knowledgeCanonicalIds: [`g7s1.operations.${suffix}`],
         difficulty: 1,
-        sourceLabel: `MVP simulated content ${suffix}`
+        sourceLabel: `MVP simulated content ${suffix}`,
+        sourceKind: "simulated",
+        sourceReference: `fixture:${suffix}`,
+        sourceUsageBasis: "synthetic test fixture"
       }
     ]
   });
@@ -109,7 +119,10 @@ function createCanonicalReplayBundle(suffix = randomUUID()): ContentBundle {
         explanation: "合并同类项。",
         knowledgeCanonicalIds: [operationsId, `g7s1.expressions.${suffix}`],
         difficulty: 2,
-        sourceLabel: base.questions[0]!.sourceLabel
+        sourceLabel: base.questions[0]!.sourceLabel,
+        sourceKind: base.questions[0]!.sourceKind,
+        sourceReference: base.questions[0]!.sourceReference,
+        sourceUsageBasis: base.questions[0]!.sourceUsageBasis
       }
     ]
   });
@@ -132,6 +145,9 @@ describe("ContentService.importBundle", () => {
     const reordered: ContentBundle = {
       questions: [...bundle.questions].reverse().map((question) => ({
         sourceLabel: question.sourceLabel,
+        sourceKind: question.sourceKind,
+        sourceReference: question.sourceReference,
+        sourceUsageBasis: question.sourceUsageBasis,
         difficulty: question.difficulty,
         knowledgeCanonicalIds: [...question.knowledgeCanonicalIds].reverse(),
         explanation: question.explanation,
@@ -297,13 +313,19 @@ describe("ContentService.importBundle", () => {
           explanation: "Fresh explanation",
           knowledgeCanonicalIds: [freshKnowledgeId],
           difficulty: 1,
-          sourceLabel: foreignSourceLabel
+          sourceLabel: foreignSourceLabel,
+          sourceKind: "simulated",
+          sourceReference: `fixture:${suffix}`,
+          sourceUsageBasis: "synthetic test fixture"
         },
         {
           ...owned.questions[0]!,
           stem: "Foreign mutation",
           knowledgeCanonicalIds: [freshKnowledgeId],
-          sourceLabel: foreignSourceLabel
+          sourceLabel: foreignSourceLabel,
+          sourceKind: "simulated",
+          sourceReference: `fixture:${suffix}`,
+          sourceUsageBasis: "synthetic test fixture"
         }
       ]
     });
@@ -500,6 +522,65 @@ describe("ContentService.importBundle", () => {
       .from(sources)
       .where(eq(sources.label, sourceLabel));
     expect(sourceCount?.value).toBe(1);
+  });
+
+  it("persists explicit source provenance", async () => {
+    const bundle = createBundle();
+
+    await service.importBundle(bundle, operator);
+
+    const [source] = await db.select({
+      reference: sources.reference,
+      metadata: sources.metadata,
+    }).from(sources).where(eq(sources.label, bundle.questions[0]!.sourceLabel));
+    expect(source).toEqual({
+      reference: bundle.questions[0]!.sourceReference,
+      metadata: {
+        kind: bundle.questions[0]!.sourceKind,
+        usageBasis: bundle.questions[0]!.sourceUsageBasis,
+      },
+    });
+  });
+
+  it("rejects conflicting provenance for an existing source label without import writes", async () => {
+    const bundle = createBundle();
+    await db.insert(sources).values({
+      label: bundle.questions[0]!.sourceLabel,
+      reference: "existing-reference",
+      metadata: { kind: "licensed", usageBasis: "existing license" },
+    });
+
+    await expect(service.importBundle(bundle, operator)).rejects.toThrow(/source provenance conflict/i);
+    expect(await db.select().from(contentBundles)
+      .where(eq(contentBundles.bundleId, bundle.bundleId))).toEqual([]);
+    expect(await db.select().from(questions)
+      .where(eq(questions.externalKey, bundle.questions[0]!.externalKey))).toEqual([]);
+  });
+
+  it("revalidates source provenance on an idempotent bundle replay", async () => {
+    const bundle = createBundle();
+    await service.importBundle(bundle, operator);
+    await db.update(sources)
+      .set({ reference: "externally-mutated-reference" })
+      .where(eq(sources.label, bundle.questions[0]!.sourceLabel));
+
+    await expect(service.importBundle(bundle, operator))
+      .rejects.toThrow(/source provenance conflict/i);
+  });
+
+  it("includes source provenance in the canonical bundle hash", async () => {
+    const bundle = createBundle();
+    await service.importBundle(bundle, operator);
+    const changedProvenance = ContentBundleSchema.parse({
+      ...bundle,
+      questions: [{
+        ...bundle.questions[0]!,
+        sourceReference: `${bundle.questions[0]!.sourceReference}-changed`,
+      }],
+    });
+
+    await expect(service.importBundle(changedProvenance, operator))
+      .rejects.toThrow(/different payload/i);
   });
 
   it("upserts distinct source labels once in deterministic global order", async () => {

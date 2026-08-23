@@ -1,4 +1,9 @@
-import type { KnowledgePointInput, QuestionInput } from "@math/contracts";
+import {
+  SourceKindSchema,
+  type ContentBundle,
+  type KnowledgePointInput,
+  type QuestionInput,
+} from "@math/contracts";
 import {
   contentBundles,
   contentBundleVersions,
@@ -11,7 +16,7 @@ import {
   questions,
   sources
 } from "@math/db";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, lte } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { alias } from "drizzle-orm/pg-core";
 
@@ -52,47 +57,107 @@ export interface StableQuestionState {
     explanation: string;
     difficulty: number | null;
     sourceLabel: string | null;
+    sourceKind: QuestionInput["sourceKind"] | null;
+    sourceReference: string | null;
+    sourceUsageBasis: string | null;
     knowledgeCanonicalIds: string[];
   } | undefined;
+}
+
+export interface PublicationResult {
+  knowledgePoints: number;
+  questions: number;
+}
+
+export class IncompletePublicationError extends Error {
+  constructor(entityType: "knowledge" | "question", entityKey: string, version: number) {
+    super(`No effective ${entityType} version for ${entityKey} at bundle version ${version}`);
+    this.name = "IncompletePublicationError";
+  }
+}
+
+export interface SourceProvenanceInput {
+  label: string;
+  kind: QuestionInput["sourceKind"];
+  reference: string;
+  usageBasis: string;
+}
+
+export class SourceProvenanceConflictError extends Error {
+  readonly code = "SOURCE_PROVENANCE_CONFLICT";
+  readonly statusCode = 409;
+
+  constructor(label: string) {
+    super(`Source provenance conflict for label: ${label}`);
+    this.name = "SourceProvenanceConflictError";
+  }
 }
 
 export class ContentRepository {
   async publishBundleRevision(
     transaction: ContentTransaction,
-    bundleId: string,
-    version: number
-  ): Promise<void> {
-    const bundleKnowledgeIds = transaction
-      .select({ id: knowledgePoints.id })
-      .from(knowledgePoints)
-      .innerJoin(contentEntityOwners, and(
-        eq(contentEntityOwners.entityType, "knowledge"),
-        eq(contentEntityOwners.entityKey, knowledgePoints.canonicalId)
-      ))
-      .where(eq(contentEntityOwners.bundleId, bundleId));
-    const bundleQuestionIds = transaction
-      .select({ id: questions.id })
-      .from(questions)
-      .innerJoin(contentEntityOwners, and(
-        eq(contentEntityOwners.entityType, "question"),
-        eq(contentEntityOwners.entityKey, questions.externalKey)
-      ))
-      .where(eq(contentEntityOwners.bundleId, bundleId));
+    bundle: ContentBundle
+  ): Promise<PublicationResult> {
+    for (const point of bundle.knowledgePoints) {
+      const [effective] = await transaction
+        .select({ id: knowledgePointVersions.id })
+        .from(knowledgePointVersions)
+        .innerJoin(knowledgePoints, eq(knowledgePointVersions.knowledgePointId, knowledgePoints.id))
+        .innerJoin(contentEntityOwners, and(
+          eq(contentEntityOwners.entityType, "knowledge"),
+          eq(contentEntityOwners.entityKey, knowledgePoints.canonicalId)
+        ))
+        .where(and(
+          eq(contentEntityOwners.bundleId, bundle.bundleId),
+          eq(knowledgePoints.canonicalId, point.canonicalId),
+          lte(knowledgePointVersions.version, bundle.version)
+        ))
+        .orderBy(desc(knowledgePointVersions.version))
+        .limit(1);
+      if (effective === undefined) {
+        throw new IncompletePublicationError("knowledge", point.canonicalId, bundle.version);
+      }
+      const published = await transaction.update(knowledgePointVersions)
+        .set({ reviewState: "published" })
+        .where(eq(knowledgePointVersions.id, effective.id))
+        .returning({ id: knowledgePointVersions.id });
+      if (published.length !== 1) {
+        throw new IncompletePublicationError("knowledge", point.canonicalId, bundle.version);
+      }
+    }
 
-    await transaction
-      .update(knowledgePointVersions)
-      .set({ reviewState: "published" })
-      .where(and(
-        eq(knowledgePointVersions.version, version),
-        inArray(knowledgePointVersions.knowledgePointId, bundleKnowledgeIds)
-      ));
-    await transaction
-      .update(questionVersions)
-      .set({ reviewState: "published" })
-      .where(and(
-        eq(questionVersions.version, version),
-        inArray(questionVersions.questionId, bundleQuestionIds)
-      ));
+    for (const question of bundle.questions) {
+      const [effective] = await transaction
+        .select({ id: questionVersions.id })
+        .from(questionVersions)
+        .innerJoin(questions, eq(questionVersions.questionId, questions.id))
+        .innerJoin(contentEntityOwners, and(
+          eq(contentEntityOwners.entityType, "question"),
+          eq(contentEntityOwners.entityKey, questions.externalKey)
+        ))
+        .where(and(
+          eq(contentEntityOwners.bundleId, bundle.bundleId),
+          eq(questions.externalKey, question.externalKey),
+          lte(questionVersions.version, bundle.version)
+        ))
+        .orderBy(desc(questionVersions.version))
+        .limit(1);
+      if (effective === undefined) {
+        throw new IncompletePublicationError("question", question.externalKey, bundle.version);
+      }
+      const published = await transaction.update(questionVersions)
+        .set({ reviewState: "published" })
+        .where(eq(questionVersions.id, effective.id))
+        .returning({ id: questionVersions.id });
+      if (published.length !== 1) {
+        throw new IncompletePublicationError("question", question.externalKey, bundle.version);
+      }
+    }
+
+    return {
+      knowledgePoints: bundle.knowledgePoints.length,
+      questions: bundle.questions.length
+    };
   }
 
   async lockBundle(transaction: ContentTransaction, bundleId: string): Promise<void> {
@@ -164,13 +229,35 @@ export class ContentRepository {
     await transaction.insert(contentBundleVersions).values({ bundleId, version, payloadHash });
   }
 
-  async upsertSource(transaction: ContentTransaction, label: string): Promise<string> {
-    const [source] = await transaction
+  async upsertSource(
+    transaction: ContentTransaction,
+    input: SourceProvenanceInput
+  ): Promise<string> {
+    const [inserted] = await transaction
       .insert(sources)
-      .values({ label })
-      .onConflictDoUpdate({ target: sources.label, set: { label } })
+      .values({
+        label: input.label,
+        reference: input.reference,
+        metadata: { kind: input.kind, usageBasis: input.usageBasis }
+      })
+      .onConflictDoNothing({ target: sources.label })
       .returning({ id: sources.id });
-    return source!.id;
+    if (inserted !== undefined) return inserted.id;
+
+    const [existing] = await transaction.select({
+      id: sources.id,
+      reference: sources.reference,
+      metadata: sources.metadata
+    }).from(sources).where(eq(sources.label, input.label));
+    if (
+      existing === undefined ||
+      existing.reference !== input.reference ||
+      existing.metadata.kind !== input.kind ||
+      existing.metadata.usageBasis !== input.usageBasis
+    ) {
+      throw new SourceProvenanceConflictError(input.label);
+    }
+    return existing.id;
   }
 
   async upsertStableKnowledgePoint(
@@ -270,7 +357,9 @@ export class ContentRepository {
         answer: questionVersions.answer,
         explanation: questionVersions.explanation,
         difficulty: questionVersions.difficulty,
-        sourceLabel: sources.label
+        sourceLabel: sources.label,
+        sourceReference: sources.reference,
+        sourceMetadata: sources.metadata
       })
       .from(questionVersions)
       .leftJoin(sources, eq(questionVersions.sourceId, sources.id))
@@ -279,6 +368,7 @@ export class ContentRepository {
       .limit(1);
 
     if (latestVersion === undefined) return { id, created, latest: undefined };
+    const sourceKind = SourceKindSchema.safeParse(latestVersion.sourceMetadata?.kind);
 
     const linkRows = await transaction
       .select({ canonicalId: knowledgePoints.canonicalId })
@@ -290,7 +380,17 @@ export class ContentRepository {
       id,
       created,
       latest: {
-        ...latestVersion,
+        version: latestVersion.version,
+        stem: latestVersion.stem,
+        answer: latestVersion.answer,
+        explanation: latestVersion.explanation,
+        difficulty: latestVersion.difficulty,
+        sourceLabel: latestVersion.sourceLabel,
+        sourceKind: sourceKind.success ? sourceKind.data : null,
+        sourceReference: latestVersion.sourceReference,
+        sourceUsageBasis: typeof latestVersion.sourceMetadata?.usageBasis === "string"
+          ? latestVersion.sourceMetadata.usageBasis
+          : null,
         knowledgeCanonicalIds: linkRows.map((row) => row.canonicalId)
       }
     };

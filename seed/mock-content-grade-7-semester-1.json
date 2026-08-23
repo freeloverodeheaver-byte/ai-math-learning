@@ -1,6 +1,6 @@
 {
   "bundleId": "mock-g7-s1",
-  "version": 1,
+  "version": 2,
   "knowledgePoints": [
     {
       "canonicalId": "g7s1.rational",
@@ -32,7 +32,10 @@
       "explanation": "异号相加，取绝对值较大数的符号。",
       "knowledgeCanonicalIds": ["g7s1.rational-operations"],
       "difficulty": 1,
-      "sourceLabel": "MVP simulated content"
+      "sourceLabel": "MVP simulated content v2",
+      "sourceKind": "simulated",
+      "sourceReference": "seed:mock-g7-s1-v2",
+      "sourceUsageBasis": "synthetic MVP seed content"
     },
     {
       "externalKey": "mock-q-002",
@@ -41,7 +44,10 @@
       "explanation": "合并同类项 3x 与 2x，常数项保持不变。",
       "knowledgeCanonicalIds": ["g7s1.algebraic-expressions"],
       "difficulty": 2,
-      "sourceLabel": "MVP simulated content"
+      "sourceLabel": "MVP simulated content v2",
+      "sourceKind": "simulated",
+      "sourceReference": "seed:mock-g7-s1-v2",
+      "sourceUsageBasis": "synthetic MVP seed content"
     }
   ]
 }

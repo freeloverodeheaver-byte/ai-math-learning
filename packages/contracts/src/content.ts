@@ -9,25 +9,37 @@ const DifficultySchema = z.union([
   z.literal(4),
   z.literal(5)
 ]);
+const NonBlankTextSchema = z.string().trim().min(1);
+
+export const SourceKindSchema = z.enum([
+  "simulated",
+  "original",
+  "licensed",
+  "public_domain",
+  "ai_generated"
+]);
 
 export const LEGACY_CONTENT_BUNDLE_ID = "__legacy_pre_import__";
 
 export const KnowledgePointInputSchema = z.strictObject({
-  canonicalId: z.string().min(1),
-  name: z.string().min(1),
+  canonicalId: NonBlankTextSchema,
+  name: NonBlankTextSchema,
   grade: GradeSchema,
   semester: SemesterSchema,
-  prerequisites: z.array(z.string().min(1))
+  prerequisites: z.array(NonBlankTextSchema)
 });
 
 export const QuestionInputSchema = z.strictObject({
-  externalKey: z.string().min(1),
-  stem: z.string().min(1),
-  answer: z.string().min(1),
-  explanation: z.string().min(1),
-  knowledgeCanonicalIds: z.array(z.string().min(1)),
+  externalKey: NonBlankTextSchema,
+  stem: NonBlankTextSchema,
+  answer: NonBlankTextSchema,
+  explanation: NonBlankTextSchema,
+  knowledgeCanonicalIds: z.array(NonBlankTextSchema).min(1),
   difficulty: DifficultySchema,
-  sourceLabel: z.string().min(1)
+  sourceLabel: NonBlankTextSchema,
+  sourceKind: SourceKindSchema,
+  sourceReference: NonBlankTextSchema,
+  sourceUsageBasis: NonBlankTextSchema
 });
 
 function addDuplicateIssue(
@@ -46,7 +58,7 @@ function addDuplicateIssue(
 }
 
 export const ContentBundleSchema = z.strictObject({
-  bundleId: z.string().min(1).refine(
+  bundleId: NonBlankTextSchema.refine(
     (bundleId) => bundleId !== LEGACY_CONTENT_BUNDLE_ID,
     { message: "Reserved legacy bundle ID" }
   ),
@@ -68,6 +80,24 @@ export const ContentBundleSchema = z.strictObject({
   );
 
   const knowledgeIds = new Set(bundle.knowledgePoints.map((item) => item.canonicalId));
+  const sourceProvenance = new Map<string, string>();
+
+  for (const [index, question] of bundle.questions.entries()) {
+    const fingerprint = JSON.stringify([
+      question.sourceKind,
+      question.sourceReference,
+      question.sourceUsageBasis
+    ]);
+    const existing = sourceProvenance.get(question.sourceLabel);
+    if (existing !== undefined && existing !== fingerprint) {
+      context.addIssue({
+        code: "custom",
+        message: `Conflicting source provenance for label: ${question.sourceLabel}`,
+        path: ["questions", index, "sourceLabel"]
+      });
+    }
+    sourceProvenance.set(question.sourceLabel, fingerprint);
+  }
 
   for (const [index, point] of bundle.knowledgePoints.entries()) {
     addDuplicateIssue(
@@ -107,5 +137,6 @@ export const ContentBundleSchema = z.strictObject({
 });
 
 export type KnowledgePointInput = z.infer<typeof KnowledgePointInputSchema>;
+export type SourceKind = z.infer<typeof SourceKindSchema>;
 export type QuestionInput = z.infer<typeof QuestionInputSchema>;
 export type ContentBundle = z.infer<typeof ContentBundleSchema>;

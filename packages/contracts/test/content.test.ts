@@ -21,12 +21,99 @@ const completeBundle = {
       explanation: "异号相加，取绝对值较大数的符号。",
       knowledgeCanonicalIds: ["g7s1.rational"],
       difficulty: 1,
-      sourceLabel: "MVP simulated content"
+      sourceLabel: "MVP simulated content",
+      sourceKind: "simulated",
+      sourceReference: "fixture:mock-g7-s1",
+      sourceUsageBasis: "synthetic test fixture"
     }
   ]
 } as const;
 
 describe("ContentBundleSchema", () => {
+  it("accepts explicit source provenance including AI-generated draft content", () => {
+    const parsed = ContentBundleSchema.parse({
+      ...completeBundle,
+      questions: [{
+        ...completeBundle.questions[0],
+        sourceKind: "ai_generated",
+        sourceReference: "generation-run-2026-08-23",
+        sourceUsageBasis: "internal evaluation only"
+      }]
+    });
+
+    expect(parsed.questions[0]?.sourceKind).toBe("ai_generated");
+  });
+
+  it("requires source kind, reference, and usage basis", () => {
+    const {
+      sourceKind: _sourceKind,
+      sourceReference: _sourceReference,
+      sourceUsageBasis: _sourceUsageBasis,
+      ...withoutProvenance
+    } = completeBundle.questions[0];
+    const parsed = ContentBundleSchema.safeParse({
+      ...completeBundle,
+      questions: [withoutProvenance]
+    });
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: ["questions", 0, "sourceKind"], code: "invalid_value" }),
+      expect.objectContaining({ path: ["questions", 0, "sourceReference"], code: "invalid_type" }),
+      expect.objectContaining({ path: ["questions", 0, "sourceUsageBasis"], code: "invalid_type" })
+    ]));
+  });
+
+  it("rejects whitespace-only substantive question and provenance fields", () => {
+    const parsed = ContentBundleSchema.safeParse({
+      ...completeBundle,
+      questions: [{
+        ...completeBundle.questions[0],
+        answer: "   ",
+        explanation: "   ",
+        sourceLabel: "   ",
+        sourceKind: "simulated",
+        sourceReference: "   ",
+        sourceUsageBasis: "   "
+      }]
+    });
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: ["questions", 0, "answer"], code: "too_small" }),
+      expect.objectContaining({ path: ["questions", 0, "explanation"], code: "too_small" }),
+      expect.objectContaining({ path: ["questions", 0, "sourceLabel"], code: "too_small" }),
+      expect.objectContaining({ path: ["questions", 0, "sourceReference"], code: "too_small" }),
+      expect.objectContaining({ path: ["questions", 0, "sourceUsageBasis"], code: "too_small" })
+    ]));
+  });
+
+  it("rejects conflicting provenance for one source label inside a bundle", () => {
+    const parsed = ContentBundleSchema.safeParse({
+      ...completeBundle,
+      questions: [
+        completeBundle.questions[0],
+        {
+          ...completeBundle.questions[0],
+          externalKey: "mock-q-002",
+          sourceKind: "licensed",
+          sourceReference: "license-b",
+          sourceUsageBasis: "licensed for training"
+        }
+      ]
+    });
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues).toContainEqual(expect.objectContaining({
+      path: ["questions", 1, "sourceLabel"],
+      code: "custom",
+      message: expect.stringMatching(/conflicting source provenance/i)
+    }));
+  });
+
   it("accepts complete mock content", () => {
     const parsed = ContentBundleSchema.parse(completeBundle);
 
@@ -42,6 +129,21 @@ describe("ContentBundleSchema", () => {
     };
 
     expect(() => ContentBundleSchema.parse(invalid)).toThrow();
+  });
+
+  it("rejects a question without a knowledge relationship", () => {
+    const parsed = ContentBundleSchema.safeParse({
+      ...completeBundle,
+      questions: [{ ...completeBundle.questions[0], knowledgeCanonicalIds: [] }]
+    });
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues).toContainEqual(expect.objectContaining({
+      path: ["questions", 0, "knowledgeCanonicalIds"],
+      code: "too_small",
+      message: expect.any(String)
+    }));
   });
 
   it("rejects the reserved legacy bundle ID", () => {
