@@ -10,6 +10,7 @@
     "test:foundation": "pnpm --filter @math/api exec vitest run foundation.e2e.test.ts",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
+    "test:native-release": "pnpm --filter @math/db exec tsx test/run-native-release-gates.ts",
     "verify": "pnpm typecheck && pnpm test"
   }
 }

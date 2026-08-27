@@ -71,18 +71,24 @@ pnpm test:foundation
 
 `x-dev-user-id` and `x-dev-roles` are development/test-only identity headers. `DEV_IDENTITY_ENABLED=true` is rejected when `NODE_ENV=production`; production identity must use a real provider rather than these headers.
 
-## Optional native PostgreSQL release gates
+## Native PostgreSQL release gates
 
-When a separate disposable PostgreSQL database is available, set `TEST_DATABASE_URL` and run the native migration and concurrency gates. In PowerShell, for example:
+Run the complete native PostgreSQL 16 release gate without Docker or a locally installed PostgreSQL server:
+
+```powershell
+pnpm test:native-release
+```
+
+This zero-configuration fallback starts a non-persistent PostgreSQL 16 server on a random loopback port, runs the native migration and access-concurrency gates, then stops the server and removes its temporary directory.
+
+For Docker, CI, or a developer-managed disposable PostgreSQL database, provide its explicit `TEST_DATABASE_URL` instead:
 
 ```powershell
 $env:TEST_DATABASE_URL = "postgresql://math_app:math_app@127.0.0.1:5432/math_learning_test"
-pnpm --filter @math/db build
-pnpm --filter @math/db test:native-migration
-pnpm --filter @math/api test:native-access-concurrency
+pnpm test:native-release
 ```
 
-These gates are intentionally separate from the deterministic PGlite suites. They are required before a native PostgreSQL release but should be skipped—not simulated—when Docker or `TEST_DATABASE_URL` is unavailable.
+The gate refuses database names without the `_test` suffix, including the default `postgres` database. Use only an explicitly disposable database: the gate applies migrations and creates test data. These gates are intentionally separate from the deterministic PGlite suites and are required before a native PostgreSQL release.
 
 ## Safe shutdown
 
