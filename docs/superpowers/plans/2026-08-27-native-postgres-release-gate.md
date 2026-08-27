@@ -32,6 +32,7 @@
 - Modify: `pnpm-workspace.yaml`
 - Modify: `pnpm-lock.yaml`
 - Create: `packages/db/test/run-native-release-gates.ts`
+- Test: `packages/db/test/native-release-runner.test.ts`
 - Modify: `docs/development/foundation.md`
 
 **Interfaces:**
@@ -50,14 +51,38 @@ pnpm --filter @math/db add -D embedded-postgres@16.14.0-beta.17
 
 Update `pnpm-workspace.yaml` so pnpm allows only the package install script required by the pinned embedded PostgreSQL dependency, alongside the existing esbuild allowance. Do not use a wildcard approval.
 
-- [ ] **Step 2: Write the native gate runner**
+- [ ] **Step 2: Write failing runner contract tests**
+
+Create `packages/db/test/native-release-runner.test.ts`. Before writing each test, name the production break it catches. Cover these observable contracts through injected `runCommand` and injected ephemeral-server lifecycle functions:
+
+1. An external URL for `math_learning_test` runs build, native migration, and native access concurrency in order with `TEST_DATABASE_URL` set to that exact URL.
+2. URLs for `postgres`, an empty database, or a database without `_test` are rejected before any command runs.
+3. An internally started database is stopped and its owned temporary directory is removed after success and after a gate failure.
+4. A gate failure remains the thrown error even if cleanup also fails.
+
+Run:
+
+```powershell
+pnpm --filter @math/db test -- native-release-runner.test.ts
+```
+
+Expected: FAIL because `run-native-release-gates.ts` does not exist.
+
+- [ ] **Step 3: Write the native gate runner**
 
 Create `packages/db/test/run-native-release-gates.ts` with these behaviors:
 
 ```ts
+export interface NativePostgresHandle {
+  readonly connectionString: string;
+  stop(): Promise<void>;
+  cleanup(): Promise<void>;
+}
+
 export interface NativeGateOptions {
   readonly externalUrl?: string;
   readonly runCommand?: (command: string, args: readonly string[], env: NodeJS.ProcessEnv) => Promise<void>;
+  readonly startEphemeralDatabase?: () => Promise<NativePostgresHandle>;
 }
 
 export async function runNativeReleaseGates(options: NativeGateOptions = {}): Promise<void>;
@@ -69,13 +94,13 @@ The runner must:
 2. Reject any selected URL whose pathname is empty, `/`, `/postgres`, or whose database name does not end in `_test`.
 3. If no URL is supplied, reserve a random loopback port, create a temporary directory with `mkdtemp`, start non-persistent `embedded-postgres` 16 on `127.0.0.1`, and create `math_learning_test`.
 4. Build `@math/db` and `@math/api` once.
-5. Execute, in order, the native migration smoke test, the native content-integrity test added in Task 2, and the native access-concurrency test, passing only `TEST_DATABASE_URL` through the child environment.
+5. Execute, in order, the native migration smoke test and native access-concurrency test, passing only `TEST_DATABASE_URL` through the child environment. Task 2 inserts the content-integrity gate between them.
 6. Stop the embedded server and remove its exact temporary directory in `finally`; never remove a caller-supplied directory.
 7. Preserve the first gate failure while still attempting cleanup.
 
 Use `spawn` with argument arrays and `shell: false`; do not construct shell command strings containing credentials.
 
-- [ ] **Step 3: Expose the command and document both database paths**
+- [ ] **Step 4: Expose the command and document both database paths**
 
 Add:
 
@@ -102,7 +127,7 @@ pnpm test:native-release
 
 for an explicitly disposable external database. State that the gate refuses database names without the `_test` suffix.
 
-- [ ] **Step 4: Run the runner through its first expected failure**
+- [ ] **Step 5: Run focused tests and the native runner**
 
 Run:
 
@@ -110,12 +135,12 @@ Run:
 pnpm test:native-release
 ```
 
-Expected: PostgreSQL starts and migration smoke passes, then the command fails because `dist/test/native-content-integrity.js` does not exist. This is the RED proof that the orchestration reaches the missing Task 2 gate.
+Expected: the runner contract tests pass, then PostgreSQL starts and both native migration and native access-concurrency gates pass.
 
-- [ ] **Step 5: Commit the runner slice**
+- [ ] **Step 6: Commit the runner slice**
 
 ```powershell
-git add package.json packages/db/package.json pnpm-workspace.yaml pnpm-lock.yaml packages/db/test/run-native-release-gates.ts docs/development/foundation.md
+git add package.json packages/db/package.json pnpm-workspace.yaml pnpm-lock.yaml packages/db/test/run-native-release-gates.ts packages/db/test/native-release-runner.test.ts docs/development/foundation.md
 git commit -m "test(db): add disposable PostgreSQL release runner"
 ```
 
