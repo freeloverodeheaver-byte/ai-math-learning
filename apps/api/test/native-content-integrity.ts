@@ -22,6 +22,16 @@ import { AuditService } from "../src/modules/audit/service.js";
 import { ContentImportWorkflow } from "../src/modules/content/import-workflow.js";
 import { ContentRepository } from "../src/modules/content/repository.js";
 import { ContentService, type ImportResult } from "../src/modules/content/service.js";
+import {
+  describePostgresRejection,
+  isExpectedPostgresRejection,
+} from "./native-content-integrity-support.js";
+
+const QUESTION_RELATIONSHIP_LOCKED = "question version relationship snapshot is locked";
+const KNOWLEDGE_RELATIONSHIP_LOCKED = "knowledge version prerequisite snapshot is locked";
+const VERSION_DELETION_LOCKED = "locked content versions cannot be deleted";
+const PUBLISHED_LIFECYCLE_LOCKED = "published content versions cannot return to an editable state";
+const RETIRED_LIFECYCLE_LOCKED = "retired content versions are terminal";
 
 const connectionString = process.env.TEST_DATABASE_URL;
 if (!connectionString) {
@@ -53,14 +63,20 @@ async function verify<Result>(
 async function expectRejected(
   invariant: string,
   identifier: string,
+  expectedMessage: string,
   mutation: () => Promise<unknown>,
 ): Promise<void> {
   try {
     await mutation();
-  } catch {
-    return;
+  } catch (error) {
+    if (isExpectedPostgresRejection(error, expectedMessage)) return;
+    assert.fail(
+      `${diagnostic(invariant, identifier)}: expected PostgreSQL P0001 "${expectedMessage}", received ${describePostgresRejection(error)}`,
+    );
   }
-  assert.fail(`${diagnostic(invariant, identifier)}: expected PostgreSQL to reject the mutation`);
+  assert.fail(
+    `${diagnostic(invariant, identifier)}: expected PostgreSQL P0001 "${expectedMessage}", but the mutation succeeded`,
+  );
 }
 
 function createWorkflow(database: Database): ContentImportWorkflow {
@@ -294,6 +310,9 @@ interface RelationshipFixture {
   knowledgeCanonicalId: string;
   questionExternalKey: string;
   knowledgePointId: string;
+  cascadeKnowledgeCanonicalId: string;
+  cascadeKnowledgePointId: string;
+  cascadeKnowledgeVersionId: string;
   questionId: string;
   primaryTargetId: string;
   alternateTargetId: string;
@@ -350,7 +369,7 @@ async function createRelationshipFixture(
     `${diagnostic("relationship fixture creation", bundle.bundleId)}: published owners must exist`,
   );
 
-  const draftVersions = await database.transaction(async (transaction) => {
+  const additionalVersions = await database.transaction(async (transaction) => {
     const draftKnowledgeVersionId = await repository.appendKnowledgeVersion(
       transaction,
       publishedKnowledgeVersion.knowledgePointId,
@@ -380,7 +399,40 @@ async function createRelationshipFixture(
       draftQuestionVersionId,
       [idByCanonicalId.get(firstPoint!.canonicalId)!],
     );
-    return { draftKnowledgeVersionId, draftQuestionVersionId };
+    const cascadeKnowledgeCanonicalId = `cascade-knowledge-${randomUUID()}`;
+    await repository.lockEntityOwner(transaction, bundle.bundleId, {
+      entityType: "knowledge",
+      entityKey: cascadeKnowledgeCanonicalId,
+    });
+    const cascadeKnowledge = await repository.upsertStableKnowledgePoint(transaction, {
+      canonicalId: cascadeKnowledgeCanonicalId,
+      name: "Cascade deletion knowledge owner",
+      grade: 7,
+      semester: 1,
+      prerequisites: [],
+    });
+    const cascadeKnowledgeVersionId = await repository.appendKnowledgeVersion(
+      transaction,
+      cascadeKnowledge.id,
+      2,
+      {
+        canonicalId: cascadeKnowledgeCanonicalId,
+        name: "Cascade deletion knowledge owner",
+        grade: 7,
+        semester: 1,
+        prerequisites: [],
+      },
+    );
+    await transaction.update(knowledgePointVersions)
+      .set({ reviewState: "published" })
+      .where(eq(knowledgePointVersions.id, cascadeKnowledgeVersionId));
+    return {
+      draftKnowledgeVersionId,
+      draftQuestionVersionId,
+      cascadeKnowledgeCanonicalId,
+      cascadeKnowledgePointId: cascadeKnowledge.id,
+      cascadeKnowledgeVersionId,
+    };
   });
 
     return {
@@ -394,9 +446,60 @@ async function createRelationshipFixture(
       thirdTargetId: idByCanonicalId.get(secondPoint!.canonicalId)!,
       publishedKnowledgeVersionId: publishedKnowledgeVersion.id,
       publishedQuestionVersionId: publishedQuestionVersion.id,
-      ...draftVersions,
+      ...additionalVersions,
     };
   });
+}
+
+async function assertRelationshipMutationRowsExist(
+  database: Database,
+  fixture: RelationshipFixture,
+  state: "published" | "retired",
+): Promise<void> {
+  const publishedQuestionRows = await database.select({
+    questionVersionId: questionVersionKnowledgePoints.questionVersionId,
+  }).from(questionVersionKnowledgePoints).where(and(
+    eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
+    eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdTargetId),
+  ));
+  assert.equal(
+    publishedQuestionRows.length,
+    1,
+    `${diagnostic(`${state} question relationship mutation precondition`, fixture.questionExternalKey)}: expected the locked UPDATE/DELETE row to exist`,
+  );
+  const draftQuestionRows = await database.select({
+    questionVersionId: questionVersionKnowledgePoints.questionVersionId,
+  }).from(questionVersionKnowledgePoints).where(and(
+    eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId),
+    eq(questionVersionKnowledgePoints.knowledgePointId, fixture.primaryTargetId),
+  ));
+  assert.equal(
+    draftQuestionRows.length,
+    1,
+    `${diagnostic(`${state} question owner-reassignment precondition`, fixture.questionExternalKey)}: expected the draft source row to exist`,
+  );
+  const publishedKnowledgeRows = await database.select({
+    knowledgePointVersionId: knowledgePointVersionPrerequisites.knowledgePointVersionId,
+  }).from(knowledgePointVersionPrerequisites).where(and(
+    eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
+    eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.primaryTargetId),
+  ));
+  assert.equal(
+    publishedKnowledgeRows.length,
+    1,
+    `${diagnostic(`${state} knowledge prerequisite mutation precondition`, fixture.knowledgeCanonicalId)}: expected the locked UPDATE/DELETE row to exist`,
+  );
+  const draftKnowledgeRows = await database.select({
+    knowledgePointVersionId: knowledgePointVersionPrerequisites.knowledgePointVersionId,
+  }).from(knowledgePointVersionPrerequisites).where(and(
+    eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId),
+    eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.alternateTargetId),
+  ));
+  assert.equal(
+    draftKnowledgeRows.length,
+    1,
+    `${diagnostic(`${state} knowledge owner-reassignment precondition`, fixture.knowledgeCanonicalId)}: expected the draft source row to exist`,
+  );
 }
 
 async function rejectQuestionRelationshipMatrix(
@@ -406,34 +509,34 @@ async function rejectQuestionRelationshipMatrix(
 ): Promise<void> {
   const invariant = `${state} question relationship snapshot immutability`;
   const id = fixture.questionExternalKey;
-  await expectRejected(invariant, id, () => database.insert(questionVersionKnowledgePoints).values({
+  await expectRejected(invariant, id, QUESTION_RELATIONSHIP_LOCKED, () => database.insert(questionVersionKnowledgePoints).values({
     questionVersionId: fixture.publishedQuestionVersionId,
     knowledgePointId: fixture.alternateTargetId,
   }));
-  await expectRejected(invariant, id, () => database.update(questionVersionKnowledgePoints)
+  await expectRejected(invariant, id, QUESTION_RELATIONSHIP_LOCKED, () => database.update(questionVersionKnowledgePoints)
     .set({ knowledgePointId: fixture.alternateTargetId })
     .where(and(
       eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
       eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdTargetId),
     )));
-  await expectRejected(invariant, id, () => database.delete(questionVersionKnowledgePoints)
+  await expectRejected(invariant, id, QUESTION_RELATIONSHIP_LOCKED, () => database.delete(questionVersionKnowledgePoints)
     .where(and(
       eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
       eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdTargetId),
     )));
-  await expectRejected(invariant, id, () => database.update(questionVersionKnowledgePoints)
+  await expectRejected(invariant, id, QUESTION_RELATIONSHIP_LOCKED, () => database.update(questionVersionKnowledgePoints)
     .set({ questionVersionId: fixture.draftQuestionVersionId })
     .where(and(
       eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
       eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdTargetId),
     )));
-  await expectRejected(invariant, id, () => database.update(questionVersionKnowledgePoints)
+  await expectRejected(invariant, id, QUESTION_RELATIONSHIP_LOCKED, () => database.update(questionVersionKnowledgePoints)
     .set({ questionVersionId: fixture.publishedQuestionVersionId })
     .where(and(
       eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId),
       eq(questionVersionKnowledgePoints.knowledgePointId, fixture.primaryTargetId),
     )));
-  await expectRejected(invariant, id, () => database.update(questionVersionKnowledgePoints)
+  await expectRejected(invariant, id, QUESTION_RELATIONSHIP_LOCKED, () => database.update(questionVersionKnowledgePoints)
     .set({
       questionVersionId: fixture.publishedQuestionVersionId,
       knowledgePointId: fixture.alternateTargetId,
@@ -442,7 +545,7 @@ async function rejectQuestionRelationshipMatrix(
       eq(questionVersionKnowledgePoints.questionVersionId, fixture.draftQuestionVersionId),
       eq(questionVersionKnowledgePoints.knowledgePointId, fixture.primaryTargetId),
     )));
-  await expectRejected(invariant, id, () => database.transaction(async (transaction) => {
+  await expectRejected(invariant, id, QUESTION_RELATIONSHIP_LOCKED, () => database.transaction(async (transaction) => {
     await transaction.delete(questionVersionKnowledgePoints).where(and(
       eq(questionVersionKnowledgePoints.questionVersionId, fixture.publishedQuestionVersionId),
       eq(questionVersionKnowledgePoints.knowledgePointId, fixture.thirdTargetId),
@@ -461,34 +564,34 @@ async function rejectKnowledgeRelationshipMatrix(
 ): Promise<void> {
   const invariant = `${state} knowledge prerequisite snapshot immutability`;
   const id = fixture.knowledgeCanonicalId;
-  await expectRejected(invariant, id, () => database.insert(knowledgePointVersionPrerequisites).values({
+  await expectRejected(invariant, id, KNOWLEDGE_RELATIONSHIP_LOCKED, () => database.insert(knowledgePointVersionPrerequisites).values({
     knowledgePointVersionId: fixture.publishedKnowledgeVersionId,
     prerequisiteKnowledgePointId: fixture.alternateTargetId,
   }));
-  await expectRejected(invariant, id, () => database.update(knowledgePointVersionPrerequisites)
+  await expectRejected(invariant, id, KNOWLEDGE_RELATIONSHIP_LOCKED, () => database.update(knowledgePointVersionPrerequisites)
     .set({ prerequisiteKnowledgePointId: fixture.alternateTargetId })
     .where(and(
       eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
       eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.primaryTargetId),
     )));
-  await expectRejected(invariant, id, () => database.delete(knowledgePointVersionPrerequisites)
+  await expectRejected(invariant, id, KNOWLEDGE_RELATIONSHIP_LOCKED, () => database.delete(knowledgePointVersionPrerequisites)
     .where(and(
       eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
       eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.primaryTargetId),
     )));
-  await expectRejected(invariant, id, () => database.update(knowledgePointVersionPrerequisites)
+  await expectRejected(invariant, id, KNOWLEDGE_RELATIONSHIP_LOCKED, () => database.update(knowledgePointVersionPrerequisites)
     .set({ knowledgePointVersionId: fixture.draftKnowledgeVersionId })
     .where(and(
       eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
       eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.primaryTargetId),
     )));
-  await expectRejected(invariant, id, () => database.update(knowledgePointVersionPrerequisites)
+  await expectRejected(invariant, id, KNOWLEDGE_RELATIONSHIP_LOCKED, () => database.update(knowledgePointVersionPrerequisites)
     .set({ knowledgePointVersionId: fixture.publishedKnowledgeVersionId })
     .where(and(
       eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId),
       eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.alternateTargetId),
     )));
-  await expectRejected(invariant, id, () => database.update(knowledgePointVersionPrerequisites)
+  await expectRejected(invariant, id, KNOWLEDGE_RELATIONSHIP_LOCKED, () => database.update(knowledgePointVersionPrerequisites)
     .set({
       knowledgePointVersionId: fixture.publishedKnowledgeVersionId,
       prerequisiteKnowledgePointId: fixture.thirdTargetId,
@@ -497,7 +600,7 @@ async function rejectKnowledgeRelationshipMatrix(
       eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.draftKnowledgeVersionId),
       eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.alternateTargetId),
     )));
-  await expectRejected(invariant, id, () => database.transaction(async (transaction) => {
+  await expectRejected(invariant, id, KNOWLEDGE_RELATIONSHIP_LOCKED, () => database.transaction(async (transaction) => {
     await transaction.delete(knowledgePointVersionPrerequisites).where(and(
       eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, fixture.publishedKnowledgeVersionId),
       eq(knowledgePointVersionPrerequisites.prerequisiteKnowledgePointId, fixture.primaryTargetId),
@@ -517,24 +620,29 @@ async function assertVersionDeletionLocks(
   await expectRejected(
     `${state} question version direct deletion lock`,
     fixture.questionExternalKey,
+    VERSION_DELETION_LOCKED,
     () => database.delete(questionVersions)
       .where(eq(questionVersions.id, fixture.publishedQuestionVersionId)),
   );
   await expectRejected(
     `${state} knowledge version direct deletion lock`,
     fixture.knowledgeCanonicalId,
+    VERSION_DELETION_LOCKED,
     () => database.delete(knowledgePointVersions)
       .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId)),
   );
   await expectRejected(
     `${state} question stable-owner cascade deletion lock`,
     fixture.questionExternalKey,
+    VERSION_DELETION_LOCKED,
     () => database.delete(questions).where(eq(questions.id, fixture.questionId)),
   );
   await expectRejected(
     `${state} knowledge stable-owner cascade deletion lock`,
-    fixture.knowledgeCanonicalId,
-    () => database.delete(knowledgePoints).where(eq(knowledgePoints.id, fixture.knowledgePointId)),
+    fixture.cascadeKnowledgeCanonicalId,
+    VERSION_DELETION_LOCKED,
+    () => database.delete(knowledgePoints)
+      .where(eq(knowledgePoints.id, fixture.cascadeKnowledgePointId)),
   );
 }
 
@@ -543,6 +651,7 @@ async function assertPublishedLifecycle(database: Database, fixture: Relationshi
     await expectRejected(
       "published question may transition only to retired",
       fixture.questionExternalKey,
+      PUBLISHED_LIFECYCLE_LOCKED,
       () => database.update(questionVersions)
         .set({ reviewState })
         .where(eq(questionVersions.id, fixture.publishedQuestionVersionId)),
@@ -550,6 +659,7 @@ async function assertPublishedLifecycle(database: Database, fixture: Relationshi
     await expectRejected(
       "published knowledge may transition only to retired",
       fixture.knowledgeCanonicalId,
+      PUBLISHED_LIFECYCLE_LOCKED,
       () => database.update(knowledgePointVersions)
         .set({ reviewState })
         .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId)),
@@ -562,6 +672,9 @@ async function assertPublishedLifecycle(database: Database, fixture: Relationshi
   await database.update(knowledgePointVersions)
     .set({ reviewState: "retired" })
     .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId));
+  await database.update(knowledgePointVersions)
+    .set({ reviewState: "retired" })
+    .where(eq(knowledgePointVersions.id, fixture.cascadeKnowledgeVersionId));
 
   const [questionState] = await database
     .select({ reviewState: questionVersions.reviewState })
@@ -588,6 +701,7 @@ async function assertRetiredLifecycle(database: Database, fixture: RelationshipF
     await expectRejected(
       "retired question version is terminal",
       fixture.questionExternalKey,
+      RETIRED_LIFECYCLE_LOCKED,
       () => database.update(questionVersions)
         .set({ reviewState })
         .where(eq(questionVersions.id, fixture.publishedQuestionVersionId)),
@@ -595,6 +709,7 @@ async function assertRetiredLifecycle(database: Database, fixture: RelationshipF
     await expectRejected(
       "retired knowledge version is terminal",
       fixture.knowledgeCanonicalId,
+      RETIRED_LIFECYCLE_LOCKED,
       () => database.update(knowledgePointVersions)
         .set({ reviewState })
         .where(eq(knowledgePointVersions.id, fixture.publishedKnowledgeVersionId)),
@@ -627,12 +742,14 @@ async function relationshipAndLifecycleIntegrity(
 ): Promise<void> {
   const fixture = await createRelationshipFixture(database, fixtureSource);
   await verify("published relationship and lifecycle integrity", fixture.bundleId, async () => {
+    await assertRelationshipMutationRowsExist(database, fixture, "published");
     await rejectQuestionRelationshipMatrix(database, fixture, "published");
     await rejectKnowledgeRelationshipMatrix(database, fixture, "published");
     await assertVersionDeletionLocks(database, fixture, "published");
     await assertPublishedLifecycle(database, fixture);
   });
   await verify("retired relationship and lifecycle integrity", fixture.bundleId, async () => {
+    await assertRelationshipMutationRowsExist(database, fixture, "retired");
     await rejectQuestionRelationshipMatrix(database, fixture, "retired");
     await rejectKnowledgeRelationshipMatrix(database, fixture, "retired");
     await assertVersionDeletionLocks(database, fixture, "retired");
