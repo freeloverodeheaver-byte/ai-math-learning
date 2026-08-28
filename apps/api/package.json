@@ -8,7 +8,8 @@
     "seed": "pnpm --filter @math/api... build && node --env-file-if-exists=../../.env dist/src/modules/content/seed.js",
     "start": "node --env-file-if-exists=../../.env --import tsx src/main.ts",
     "test": "vitest run --exclude dist/** --testTimeout 15000",
-    "test:native-access-concurrency": "pnpm --filter @math/api... build && node dist/test/native-access-concurrency.js",
+    "test:native-access-concurrency": "pnpm --filter @math/api... build && pnpm run test:native-access-concurrency:built",
+    "test:native-access-concurrency:built": "node dist/test/native-access-concurrency.js",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

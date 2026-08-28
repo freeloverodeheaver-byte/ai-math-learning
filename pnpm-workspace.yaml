@@ -4,4 +4,12 @@ packages:
 
 allowBuilds:
   'embedded-postgres@16.14.0-beta.17': true
+  '@embedded-postgres/darwin-arm64@16.14.0-beta.17': true
+  '@embedded-postgres/darwin-x64@16.14.0-beta.17': true
+  '@embedded-postgres/linux-arm@16.14.0-beta.17': true
+  '@embedded-postgres/linux-arm64@16.14.0-beta.17': true
+  '@embedded-postgres/linux-ia32@16.14.0-beta.17': true
+  '@embedded-postgres/linux-ppc64@16.14.0-beta.17': true
+  '@embedded-postgres/linux-x64@16.14.0-beta.17': true
+  '@embedded-postgres/windows-x64@16.14.0-beta.17': true
   'esbuild@0.18.20 || 0.25.12 || 0.28.2': true

@@ -25,6 +25,9 @@ export interface NativeGateOptions {
 
 type RunCommand = NonNullable<NativeGateOptions["runCommand"]>;
 
+const cleanupRetryLimit = 5;
+const cleanupRetryDelayMs = 50;
+
 function selectedExternalUrl(options: NativeGateOptions): string | undefined {
   return options.externalUrl ?? process.env.TEST_DATABASE_URL;
 }
@@ -97,7 +100,12 @@ async function startEmbeddedDatabase(): Promise<NativePostgresHandle> {
     return {
       connectionString: `postgresql://postgres:${password}@127.0.0.1:${port}/math_learning_test`,
       stop: () => postgres!.stop(),
-      cleanup: () => rm(temporaryDirectory, { recursive: true, force: true }),
+      cleanup: () => rm(temporaryDirectory, {
+        recursive: true,
+        force: true,
+        maxRetries: cleanupRetryLimit,
+        retryDelay: cleanupRetryDelayMs,
+      }),
     };
   } catch (error) {
     await postgres?.stop().catch(() => undefined);
@@ -129,19 +137,40 @@ function runSpawnedCommand(
   });
 }
 
+function isTransientWindowsCleanupError(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && ((error as { code?: unknown }).code === "EBUSY" || (error as { code?: unknown }).code === "EPERM");
+}
+
+async function retryOwnedCleanup(cleanup: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; attempt <= cleanupRetryLimit; attempt += 1) {
+    try {
+      await cleanup();
+      return;
+    } catch (error) {
+      if (!isTransientWindowsCleanupError(error) || attempt === cleanupRetryLimit) throw error;
+      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, cleanupRetryDelayMs * (attempt + 1)));
+    }
+  }
+}
+
 async function cleanupOwnedDatabase(handle: NativePostgresHandle): Promise<unknown> {
-  let cleanupError: unknown;
+  let stopError: unknown;
   try {
     await handle.stop();
   } catch (error) {
+    stopError = error;
+  }
+  let cleanupError: unknown;
+  try {
+    await retryOwnedCleanup(handle.cleanup);
+  } catch (error) {
     cleanupError = error;
   }
-  try {
-    await handle.cleanup();
-  } catch (error) {
-    cleanupError ??= error;
-  }
-  return cleanupError;
+  if (cleanupError !== undefined) return stopError ?? cleanupError;
+  return isTransientWindowsCleanupError(stopError) ? undefined : stopError;
 }
 
 export async function runNativeReleaseGates(options: NativeGateOptions = {}): Promise<void> {
@@ -160,7 +189,7 @@ export async function runNativeReleaseGates(options: NativeGateOptions = {}): Pr
     await runCommand("pnpm", ["--filter", "@math/db", "build"], childEnvironment);
     await runCommand("pnpm", ["--filter", "@math/api", "build"], childEnvironment);
     await runCommand("pnpm", ["--filter", "@math/db", "test:native-migration"], childEnvironment);
-    await runCommand("pnpm", ["--filter", "@math/api", "test:native-access-concurrency"], childEnvironment);
+    await runCommand("pnpm", ["--filter", "@math/api", "test:native-access-concurrency:built"], childEnvironment);
   } catch (error) {
     gateFailed = true;
     throw error;

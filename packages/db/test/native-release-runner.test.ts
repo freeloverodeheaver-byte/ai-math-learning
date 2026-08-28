@@ -15,9 +15,13 @@ function createHandle(overrides: Partial<NativePostgresHandle> = {}): NativePost
   };
 }
 
+function busyError(): Error & { code: string } {
+  return Object.assign(new Error("directory remains busy while PostgreSQL exits"), { code: "EBUSY" });
+}
+
 describe("runNativeReleaseGates", () => {
-  // Break caught: a runner that omits a build, changes the prescribed gate order,
-  // or leaks unrelated environment variables into the child process.
+  // Break caught: a runner that rebuilds the API through its standalone gate,
+  // omits a build, changes the prescribed order, or leaks child environment variables.
   it("runs the native gates in order against an explicitly disposable external database", async () => {
     const commands: Array<{ command: string; args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
 
@@ -35,7 +39,7 @@ describe("runNativeReleaseGates", () => {
       { command: "pnpm", args: ["--filter", "@math/db", "build"], env: { TEST_DATABASE_URL: externalUrl } },
       { command: "pnpm", args: ["--filter", "@math/api", "build"], env: { TEST_DATABASE_URL: externalUrl } },
       { command: "pnpm", args: ["--filter", "@math/db", "test:native-migration"], env: { TEST_DATABASE_URL: externalUrl } },
-      { command: "pnpm", args: ["--filter", "@math/api", "test:native-access-concurrency"], env: { TEST_DATABASE_URL: externalUrl } },
+      { command: "pnpm", args: ["--filter", "@math/api", "test:native-access-concurrency:built"], env: { TEST_DATABASE_URL: externalUrl } },
     ]);
   });
 
@@ -82,6 +86,25 @@ describe("runNativeReleaseGates", () => {
     })).rejects.toBe(gateFailure);
 
     expect(lifecycle).toEqual(["stop", "cleanup"]);
+  });
+
+  // Break caught: a Windows PostgreSQL process tree releasing its data directory
+  // after the first removal attempt and leaking the runner-owned temporary root.
+  it("retries transient Windows cleanup failures until the owned root is removed", async () => {
+    let cleanupAttempts = 0;
+
+    await expect(runNativeReleaseGates({
+      runCommand: async () => {},
+      startEphemeralDatabase: async () => createHandle({
+        stop: async () => { throw busyError(); },
+        cleanup: async () => {
+          cleanupAttempts += 1;
+          if (cleanupAttempts === 1) throw busyError();
+        },
+      }),
+    })).resolves.toBeUndefined();
+
+    expect(cleanupAttempts).toBe(2);
   });
 
   // Break caught: a cleanup failure replacing the gate failure that explains why the release is unsafe.
