@@ -95,6 +95,7 @@ describe("runNativeReleaseGates", () => {
     let cleanupAttempts = 0;
 
     await expect(runNativeReleaseGates({
+      cleanupPlatform: "win32",
       runCommand: async () => {},
       startEphemeralDatabase: async () => createHandle({
         stop: async () => { throw busyError(); },
