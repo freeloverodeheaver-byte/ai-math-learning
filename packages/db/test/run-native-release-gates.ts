@@ -186,6 +186,7 @@ export async function runNativeReleaseGates(options: NativeGateOptions = {}): Pr
   let gateFailed = false;
 
   try {
+    await runCommand("pnpm", ["--filter", "@math/contracts", "build"], childEnvironment);
     await runCommand("pnpm", ["--filter", "@math/db", "build"], childEnvironment);
     await runCommand("pnpm", ["--filter", "@math/api", "build"], childEnvironment);
     await runCommand("pnpm", ["--filter", "@math/db", "test:native-migration"], childEnvironment);

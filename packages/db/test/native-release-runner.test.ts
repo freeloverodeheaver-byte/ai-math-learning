@@ -20,8 +20,8 @@ function busyError(): Error & { code: string } {
 }
 
 describe("runNativeReleaseGates", () => {
-  // Break caught: a runner that rebuilds the API through its standalone gate,
-  // omits a build, changes the prescribed order, or leaks child environment variables.
+  // Break caught: a clean checkout reaching the API without a contracts build,
+  // rebuilding the API through its standalone gate, changing order, or leaking child environment variables.
   it("runs the native gates in order against an explicitly disposable external database", async () => {
     const commands: Array<{ command: string; args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
 
@@ -36,6 +36,7 @@ describe("runNativeReleaseGates", () => {
     });
 
     expect(commands).toEqual([
+      { command: "pnpm", args: ["--filter", "@math/contracts", "build"], env: { TEST_DATABASE_URL: externalUrl } },
       { command: "pnpm", args: ["--filter", "@math/db", "build"], env: { TEST_DATABASE_URL: externalUrl } },
       { command: "pnpm", args: ["--filter", "@math/api", "build"], env: { TEST_DATABASE_URL: externalUrl } },
       { command: "pnpm", args: ["--filter", "@math/db", "test:native-migration"], env: { TEST_DATABASE_URL: externalUrl } },
