@@ -108,6 +108,44 @@ describe("runNativeReleaseGates", () => {
     expect(cleanupAttempts).toBe(2);
   });
 
+  // Break caught: a stopped embedded process never resolving and hanging the release gate forever.
+  it("fails when an owned stop operation exceeds its cleanup timeout", async () => {
+    await expect(runNativeReleaseGates({
+      cleanupTimeoutMs: 1,
+      runCommand: async () => {},
+      startEphemeralDatabase: async () => createHandle({
+        stop: async () => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 20)),
+      }),
+    })).rejects.toThrow(/timed out/i);
+  });
+
+  // Break caught: a root cleanup failure hidden behind an earlier stop failure.
+  it("reports a root cleanup failure instead of a concurrent stop failure", async () => {
+    const stopFailure = new Error("stop failed");
+    const cleanupFailure = new Error("owned root removal failed");
+
+    await expect(runNativeReleaseGates({
+      runCommand: async () => {},
+      startEphemeralDatabase: async () => createHandle({
+        stop: async () => { throw stopFailure; },
+        cleanup: async () => { throw cleanupFailure; },
+      }),
+    })).rejects.toBe(cleanupFailure);
+  });
+
+  // Break caught: a POSIX stop failure being silently accepted because a later directory removal succeeds.
+  it("preserves a transient stop failure outside Windows", async () => {
+    const stopFailure = busyError();
+
+    await expect(runNativeReleaseGates({
+      cleanupPlatform: "linux",
+      runCommand: async () => {},
+      startEphemeralDatabase: async () => createHandle({
+        stop: async () => { throw stopFailure; },
+      }),
+    })).rejects.toBe(stopFailure);
+  });
+
   // Break caught: a cleanup failure replacing the gate failure that explains why the release is unsafe.
   it("preserves a gate failure when cleanup also fails", async () => {
     const gateFailure = new Error("native migration failed");

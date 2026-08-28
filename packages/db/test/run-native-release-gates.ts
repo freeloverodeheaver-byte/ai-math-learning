@@ -15,6 +15,9 @@ export interface NativePostgresHandle {
 
 export interface NativeGateOptions {
   readonly externalUrl?: string;
+  readonly cleanupTimeoutMs?: number;
+  readonly cleanupRetryDelayMs?: number;
+  readonly cleanupPlatform?: NodeJS.Platform;
   readonly runCommand?: (
     command: string,
     args: readonly string[],
@@ -26,7 +29,44 @@ export interface NativeGateOptions {
 type RunCommand = NonNullable<NativeGateOptions["runCommand"]>;
 
 const cleanupRetryLimit = 5;
-const cleanupRetryDelayMs = 50;
+const defaultCleanupRetryDelayMs = 50;
+const defaultCleanupTimeoutMs = 5_000;
+
+interface CleanupSettings {
+  readonly platform: NodeJS.Platform;
+  readonly retryDelayMs: number;
+  readonly timeoutMs: number;
+}
+
+function positiveFiniteOr(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function cleanupSettings(options: NativeGateOptions): CleanupSettings {
+  return {
+    platform: options.cleanupPlatform ?? process.platform,
+    retryDelayMs: positiveFiniteOr(options.cleanupRetryDelayMs, defaultCleanupRetryDelayMs),
+    timeoutMs: positiveFiniteOr(options.cleanupTimeoutMs, defaultCleanupTimeoutMs),
+  };
+}
+
+async function withCleanupTimeout(
+  operation: () => Promise<void>,
+  timeoutMs: number,
+  operationName: string,
+): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise<void>((_resolvePromise, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 function selectedExternalUrl(options: NativeGateOptions): string | undefined {
   return options.externalUrl ?? process.env.TEST_DATABASE_URL;
@@ -77,7 +117,7 @@ async function reserveLoopbackPort(): Promise<number> {
   }
 }
 
-async function startEmbeddedDatabase(): Promise<NativePostgresHandle> {
+async function startEmbeddedDatabase(settings: CleanupSettings): Promise<NativePostgresHandle> {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "math-native-postgres-"));
   let postgres: EmbeddedPostgres | undefined;
 
@@ -104,12 +144,24 @@ async function startEmbeddedDatabase(): Promise<NativePostgresHandle> {
         recursive: true,
         force: true,
         maxRetries: cleanupRetryLimit,
-        retryDelay: cleanupRetryDelayMs,
+        retryDelay: settings.retryDelayMs,
       }),
     };
   } catch (error) {
-    await postgres?.stop().catch(() => undefined);
-    await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined);
+    if (postgres) {
+      const startedPostgres = postgres;
+      await withCleanupTimeout(() => startedPostgres.stop(), settings.timeoutMs, "embedded PostgreSQL stop").catch(() => undefined);
+    }
+    await withCleanupTimeout(
+      () => rm(temporaryDirectory, {
+        recursive: true,
+        force: true,
+        maxRetries: cleanupRetryLimit,
+        retryDelay: settings.retryDelayMs,
+      }),
+      settings.timeoutMs,
+      "embedded PostgreSQL temporary-root cleanup",
+    ).catch(() => undefined);
     throw error;
   }
 }
@@ -144,41 +196,42 @@ function isTransientWindowsCleanupError(error: unknown): boolean {
     && ((error as { code?: unknown }).code === "EBUSY" || (error as { code?: unknown }).code === "EPERM");
 }
 
-async function retryOwnedCleanup(cleanup: () => Promise<void>): Promise<void> {
+async function retryOwnedCleanup(cleanup: () => Promise<void>, settings: CleanupSettings): Promise<void> {
   for (let attempt = 0; attempt <= cleanupRetryLimit; attempt += 1) {
     try {
-      await cleanup();
+      await withCleanupTimeout(cleanup, settings.timeoutMs, "embedded PostgreSQL temporary-root cleanup");
       return;
     } catch (error) {
       if (!isTransientWindowsCleanupError(error) || attempt === cleanupRetryLimit) throw error;
-      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, cleanupRetryDelayMs * (attempt + 1)));
+      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, settings.retryDelayMs * (attempt + 1)));
     }
   }
 }
 
-async function cleanupOwnedDatabase(handle: NativePostgresHandle): Promise<unknown> {
+async function cleanupOwnedDatabase(handle: NativePostgresHandle, settings: CleanupSettings): Promise<unknown> {
   let stopError: unknown;
   try {
-    await handle.stop();
+    await withCleanupTimeout(handle.stop, settings.timeoutMs, "embedded PostgreSQL stop");
   } catch (error) {
     stopError = error;
   }
   let cleanupError: unknown;
   try {
-    await retryOwnedCleanup(handle.cleanup);
+    await retryOwnedCleanup(handle.cleanup, settings);
   } catch (error) {
     cleanupError = error;
   }
-  if (cleanupError !== undefined) return stopError ?? cleanupError;
-  return isTransientWindowsCleanupError(stopError) ? undefined : stopError;
+  if (cleanupError !== undefined) return cleanupError;
+  return settings.platform === "win32" && isTransientWindowsCleanupError(stopError) ? undefined : stopError;
 }
 
 export async function runNativeReleaseGates(options: NativeGateOptions = {}): Promise<void> {
+  const cleanup = cleanupSettings(options);
   const externalUrl = selectedExternalUrl(options);
   if (externalUrl !== undefined) validateDisposableDatabaseUrl(externalUrl);
 
   const handle = externalUrl === undefined
-    ? await (options.startEphemeralDatabase ?? startEmbeddedDatabase)()
+    ? await (options.startEphemeralDatabase ?? (() => startEmbeddedDatabase(cleanup)))()
     : undefined;
   const connectionString = externalUrl ?? handle!.connectionString;
   const childEnvironment: NodeJS.ProcessEnv = { TEST_DATABASE_URL: connectionString };
@@ -196,7 +249,7 @@ export async function runNativeReleaseGates(options: NativeGateOptions = {}): Pr
     throw error;
   } finally {
     if (handle) {
-      const cleanupError = await cleanupOwnedDatabase(handle);
+      const cleanupError = await cleanupOwnedDatabase(handle, cleanup);
       if (!gateFailed && cleanupError !== undefined) throw cleanupError;
     }
   }
