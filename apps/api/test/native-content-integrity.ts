@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ContentBundle } from "@math/contracts";
 import {
   auditEvents,
+  contentBundles,
   contentBundleVersions,
   contentEntityOwners,
   createDb,
@@ -16,7 +18,7 @@ import {
   questions,
   type Database,
 } from "@math/db";
-import { and, count, eq, inArray } from "drizzle-orm";
+import { and, count, eq, inArray, sql } from "drizzle-orm";
 import { AuditRepository } from "../src/modules/audit/repository.js";
 import { AuditService } from "../src/modules/audit/service.js";
 import { ContentImportWorkflow } from "../src/modules/content/import-workflow.js";
@@ -79,8 +81,10 @@ async function expectRejected(
   );
 }
 
-function createWorkflow(database: Database): ContentImportWorkflow {
-  const repository = new ContentRepository();
+function createWorkflow(
+  database: Database,
+  repository = new ContentRepository(),
+): ContentImportWorkflow {
   return new ContentImportWorkflow(
     database,
     new ContentService(database, repository),
@@ -266,13 +270,6 @@ async function idempotentPublication(database: Database, fixture: ContentBundle)
   });
 }
 
-function isCreatedResult(result: ImportResult): boolean {
-  return result.createdKnowledge === 3
-    && result.createdQuestions === 2
-    && result.newVersions === 0
-    && result.unchanged === 0;
-}
-
 function isUnchangedResult(result: ImportResult): boolean {
   return result.createdKnowledge === 0
     && result.createdQuestions === 0
@@ -280,28 +277,208 @@ function isUnchangedResult(result: ImportResult): boolean {
     && result.unchanged === 5;
 }
 
+function isNewRevisionResult(result: ImportResult): boolean {
+  return result.createdKnowledge === 0
+    && result.createdQuestions === 0
+    && result.newVersions === 5
+    && result.unchanged === 0;
+}
+
+interface Deferred<Value> {
+  promise: Promise<Value>;
+  resolve: (value: Value) => void;
+}
+
+function deferred<Value>(): Deferred<Value> {
+  let resolve!: (value: Value) => void;
+  const promise = new Promise<Value>((fulfilled) => {
+    resolve = fulfilled;
+  });
+  return { promise, resolve };
+}
+
+function changedRevision(bundle: ContentBundle): ContentBundle {
+  return {
+    ...bundle,
+    version: 3,
+    knowledgePoints: bundle.knowledgePoints.map((point) => ({
+      ...point,
+      name: `${point.name} revision 3`,
+    })),
+    questions: bundle.questions.map((question) => ({
+      ...question,
+      stem: `${question.stem} revision 3`,
+    })),
+  };
+}
+
+async function waitForBundleRowLock(
+  database: Database,
+  backendPid: number,
+  bundleId: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const activity = await database.$client.query<{
+      query: string;
+      wait_event_type: string | null;
+    }>(
+      "select query, wait_event_type from pg_stat_activity where pid = $1",
+      [backendPid],
+    );
+    const row = activity.rows[0];
+    const query = row?.query.toLowerCase() ?? "";
+    if (
+      row?.wait_event_type === "Lock"
+      && query.includes("content_bundles")
+      && query.includes("for update")
+    ) {
+      return;
+    }
+    await delay(10);
+  }
+  assert.fail(
+    `${diagnostic("existing-bundle explicit row-lock observation", bundleId)}: backend ${backendPid} never blocked on content_bundles SELECT FOR UPDATE`,
+  );
+}
+
+async function assertRevisedBundleCounts(
+  database: Database,
+  bundle: ContentBundle,
+): Promise<void> {
+  const invariant = "existing-bundle new-revision serialization";
+  const id = bundle.bundleId;
+  const canonicalIds = bundle.knowledgePoints.map((point) => point.canonicalId);
+  const externalKeys = bundle.questions.map((question) => question.externalKey);
+  const [bundleCount] = await database.select({ value: count() })
+    .from(contentBundles)
+    .where(eq(contentBundles.bundleId, id));
+  assert.equal(bundleCount?.value, 1, `${diagnostic(invariant, id)}: expected exactly 1 bundle row`);
+  const [bundleRevisionCount] = await database.select({ value: count() })
+    .from(contentBundleVersions)
+    .where(eq(contentBundleVersions.bundleId, id));
+  assert.equal(bundleRevisionCount?.value, 2, `${diagnostic(invariant, id)}: expected exactly 2 bundle-version rows`);
+  const [stableKnowledgeCount] = await database.select({ value: count() })
+    .from(knowledgePoints)
+    .where(inArray(knowledgePoints.canonicalId, canonicalIds));
+  assert.equal(stableKnowledgeCount?.value, 3, `${diagnostic(invariant, id)}: expected exactly 3 stable knowledge records`);
+  const [stableQuestionCount] = await database.select({ value: count() })
+    .from(questions)
+    .where(inArray(questions.externalKey, externalKeys));
+  assert.equal(stableQuestionCount?.value, 2, `${diagnostic(invariant, id)}: expected exactly 2 stable question records`);
+  const [ownerCount] = await database.select({ value: count() })
+    .from(contentEntityOwners)
+    .where(eq(contentEntityOwners.bundleId, id));
+  assert.equal(ownerCount?.value, 5, `${diagnostic(invariant, id)}: expected exactly 5 stable content owners`);
+  const [knowledgeVersionCount] = await database.select({ value: count() })
+    .from(knowledgePointVersions)
+    .innerJoin(knowledgePoints, eq(knowledgePointVersions.knowledgePointId, knowledgePoints.id))
+    .where(inArray(knowledgePoints.canonicalId, canonicalIds));
+  assert.equal(knowledgeVersionCount?.value, 6, `${diagnostic(invariant, id)}: expected exactly 6 knowledge versions`);
+  const [questionVersionCount] = await database.select({ value: count() })
+    .from(questionVersions)
+    .innerJoin(questions, eq(questionVersions.questionId, questions.id))
+    .where(inArray(questions.externalKey, externalKeys));
+  assert.equal(questionVersionCount?.value, 4, `${diagnostic(invariant, id)}: expected exactly 4 question versions`);
+  const [prerequisiteCount] = await database.select({ value: count() })
+    .from(knowledgePointVersionPrerequisites)
+    .innerJoin(
+      knowledgePointVersions,
+      eq(knowledgePointVersionPrerequisites.knowledgePointVersionId, knowledgePointVersions.id),
+    )
+    .innerJoin(knowledgePoints, eq(knowledgePointVersions.knowledgePointId, knowledgePoints.id))
+    .where(inArray(knowledgePoints.canonicalId, canonicalIds));
+  assert.equal(prerequisiteCount?.value, 4, `${diagnostic(invariant, id)}: expected exactly 4 prerequisite snapshots`);
+  const [questionLinkCount] = await database.select({ value: count() })
+    .from(questionVersionKnowledgePoints)
+    .innerJoin(questionVersions, eq(questionVersionKnowledgePoints.questionVersionId, questionVersions.id))
+    .innerJoin(questions, eq(questionVersions.questionId, questions.id))
+    .where(inArray(questions.externalKey, externalKeys));
+  assert.equal(questionLinkCount?.value, 4, `${diagnostic(invariant, id)}: expected exactly 4 question relationship snapshots`);
+  for (const action of ["content.bundle.imported", "content.bundle.published"] as const) {
+    const [auditCount] = await database.select({ value: count() })
+      .from(auditEvents)
+      .where(and(eq(auditEvents.subjectId, id), eq(auditEvents.action, action)));
+    assert.equal(auditCount?.value, 3, `${diagnostic(invariant, id)}: expected exactly 3 ${action} events`);
+  }
+}
+
 async function concurrentPublication(
   databaseA: Database,
   databaseB: Database,
   fixture: ContentBundle,
 ): Promise<void> {
-  const bundle = uniqueBundle(fixture, "concurrent");
-  await verify("same-bundle concurrent import serialization", bundle.bundleId, async () => {
-    const results = await Promise.all([
-      createWorkflow(databaseA).execute(bundle, { actor: null, metadata: { lane: "A" } }),
-      createWorkflow(databaseB).execute(bundle, { actor: null, metadata: { lane: "B" } }),
-    ]);
+  const initialBundle = uniqueBundle(fixture, "concurrent-revision");
+  const bundle = changedRevision(initialBundle);
+  await verify("existing-bundle new-revision serialization", bundle.bundleId, async () => {
+    await createWorkflow(databaseA).execute(initialBundle, {
+      actor: null,
+      metadata: { lane: "initial" },
+    });
+    const firstReachedRevisionRead = deferred<void>();
+    const allowFirstToReadRevision = deferred<void>();
+    const secondBackendPid = deferred<number>();
+
+    class PauseAfterBundleLockRepository extends ContentRepository {
+      override async findBundleVersion(...args: Parameters<ContentRepository["findBundleVersion"]>) {
+        firstReachedRevisionRead.resolve(undefined);
+        await allowFirstToReadRevision.promise;
+        return super.findBundleVersion(...args);
+      }
+    }
+
+    class ObserveBundleLockAttemptRepository extends ContentRepository {
+      override async lockBundle(...args: Parameters<ContentRepository["lockBundle"]>): Promise<void> {
+        const [transaction] = args;
+        const [backend] = await transaction
+          .select({ pid: sql<number>`pg_backend_pid()` })
+          .from(sql`(select 1) as backend_identity`);
+        assert.ok(
+          backend,
+          `${diagnostic("existing-bundle competing backend observation", bundle.bundleId)}: expected pg_backend_pid()`,
+        );
+        secondBackendPid.resolve(backend.pid);
+        await super.lockBundle(...args);
+      }
+    }
+
+    const first = createWorkflow(
+      databaseA,
+      new PauseAfterBundleLockRepository(),
+    ).execute(bundle, { actor: null, metadata: { lane: "A" } });
+    await firstReachedRevisionRead.promise;
+    const second = createWorkflow(
+      databaseB,
+      new ObserveBundleLockAttemptRepository(),
+    ).execute(bundle, { actor: null, metadata: { lane: "B" } });
+    const backendPid = await secondBackendPid.promise;
+    let observationFailure: unknown;
+    try {
+      await waitForBundleRowLock(databaseA, backendPid, bundle.bundleId);
+    } catch (error) {
+      observationFailure = error;
+    } finally {
+      allowFirstToReadRevision.resolve(undefined);
+    }
+    const outcomes = await Promise.allSettled([first, second]);
+    if (observationFailure !== undefined) throw observationFailure;
     assert.equal(
-      results.filter(isCreatedResult).length,
+      outcomes.filter((outcome) => outcome.status === "fulfilled").length,
+      2,
+      `${diagnostic("existing-bundle new-revision serialization", bundle.bundleId)}: both imports must fulfill after row-lock serialization`,
+    );
+    const results = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
+    assert.equal(
+      results.filter(isNewRevisionResult).length,
       1,
-      `${diagnostic("same-bundle concurrent import serialization", bundle.bundleId)}: exactly one result must create 5 stable records`,
+      `${diagnostic("existing-bundle new-revision serialization", bundle.bundleId)}: exactly one result must create 5 new versions`,
     );
     assert.equal(
       results.filter(isUnchangedResult).length,
       1,
-      `${diagnostic("same-bundle concurrent import serialization", bundle.bundleId)}: exactly one result must report 5 unchanged items`,
+      `${diagnostic("existing-bundle new-revision serialization", bundle.bundleId)}: exactly one result must report 5 unchanged items`,
     );
-    await assertBundleCounts(databaseA, bundle, 2, "same-bundle concurrent import serialization");
+    await assertRevisedBundleCounts(databaseA, bundle);
   });
 }
 
