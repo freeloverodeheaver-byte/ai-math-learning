@@ -79,7 +79,7 @@ Run the complete native PostgreSQL 16 release gate without Docker or a locally i
 pnpm test:native-release
 ```
 
-This zero-configuration fallback starts a non-persistent PostgreSQL 16 server on a random loopback port, runs the native migration and access-concurrency gates, then stops the server and removes its temporary directory.
+This zero-configuration fallback starts a non-persistent PostgreSQL 16 server on a random loopback port, runs the native migration, content-integrity, and access-concurrency gates, then stops the server and removes its temporary directory. The content gate replays the committed migration journal, imports and publishes the committed mock bundle twice, races two imports through independent pools, and verifies exact stable/version/relationship/bundle/audit counts. It also verifies that published and retired relationship snapshots and version lifecycles remain immutable while editable draft versions remain deletable.
 
 For Docker, CI, or a developer-managed disposable PostgreSQL database, provide its explicit `TEST_DATABASE_URL` instead:
 

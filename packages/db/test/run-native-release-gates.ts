@@ -243,6 +243,7 @@ export async function runNativeReleaseGates(options: NativeGateOptions = {}): Pr
     await runCommand("pnpm", ["--filter", "@math/db", "build"], childEnvironment);
     await runCommand("pnpm", ["--filter", "@math/api", "build"], childEnvironment);
     await runCommand("pnpm", ["--filter", "@math/db", "test:native-migration"], childEnvironment);
+    await runCommand("pnpm", ["--filter", "@math/api", "test:native-content-integrity"], childEnvironment);
     await runCommand("pnpm", ["--filter", "@math/api", "test:native-access-concurrency:built"], childEnvironment);
   } catch (error) {
     gateFailed = true;

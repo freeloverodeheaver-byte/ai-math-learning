@@ -40,6 +40,7 @@ describe("runNativeReleaseGates", () => {
       { command: "pnpm", args: ["--filter", "@math/db", "build"], env: { TEST_DATABASE_URL: externalUrl } },
       { command: "pnpm", args: ["--filter", "@math/api", "build"], env: { TEST_DATABASE_URL: externalUrl } },
       { command: "pnpm", args: ["--filter", "@math/db", "test:native-migration"], env: { TEST_DATABASE_URL: externalUrl } },
+      { command: "pnpm", args: ["--filter", "@math/api", "test:native-content-integrity"], env: { TEST_DATABASE_URL: externalUrl } },
       { command: "pnpm", args: ["--filter", "@math/api", "test:native-access-concurrency:built"], env: { TEST_DATABASE_URL: externalUrl } },
     ]);
   });
