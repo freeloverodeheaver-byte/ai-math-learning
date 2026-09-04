@@ -1,7 +1,7 @@
 # 7.3 CI/CD 双平台发布门禁设计
 
 **日期：** 2026-09-03  
-**状态：** 已确认设计，待编写实施计划  
+**状态：** 设计已确认，实施计划待确认
 **范围：** 仅接入 GitHub Actions 发布资格门禁，不连接或部署到生产服务器
 
 ## 1. 背景与目标
@@ -89,7 +89,7 @@ GitHub 分支保护或 Ruleset 只要求 `Release Gate Required`。固定汇总�
 - `workflow_dispatch`：允许人工重跑。
 - `merge_group` 的 `checks_requested`：为以后启用 GitHub merge queue 保留兼容性。
 
-并发组由工作流名称与 pull request 编号或 Git ref 组成。只对 `pull_request` 事件取消同一变更的旧运行；`push`、`workflow_dispatch` 和 `merge_group` 运行不自动取消，保证主分支和人工发布资格结果完整可追溯。
+并发组由工作流名称与 pull request 编号或唯一 run ID 组成。`pull_request` 事件复用同一 PR 的并发组并取消旧运行；`push`、`workflow_dispatch` 和 `merge_group` 使用各自唯一的 run ID，因此不会因共享并发组而替换 pending 运行或取消正在运行的任务，保证主分支和人工发布资格结果完整可追溯。
 
 不使用 `pull_request_target`，避免在高权限上下文执行来自 pull request 的代码。
 
@@ -185,4 +185,3 @@ GitHub 分支保护或 Ruleset 只要求 `Release Gate Required`。固定汇总�
 - [pnpm/action-setup](https://github.com/pnpm/action-setup)
 - [embedded-postgres](https://github.com/leinelissen/embedded-postgres)
 - [Node.js v24 发布归档](https://nodejs.org/en/download/archive/v24)
-
