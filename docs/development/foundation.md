@@ -90,6 +90,8 @@ pnpm test:native-release
 
 The gate refuses database names without the `_test` suffix, including the default `postgres` database. Use only an explicitly disposable database: the gate applies migrations and creates test data. These gates are intentionally separate from the deterministic PGlite suites and are required before a native PostgreSQL release.
 
+GitHub pull requests and `master` pushes run these gates on native Ubuntu and Windows runners. See [CI release gate](./ci-release-gate.md) for the required-check contract, failure diagnosis, local reproduction, and safe retirement procedure.
+
 ## Safe shutdown
 
 Stop the local services without deleting the named database volume:
