@@ -5,12 +5,25 @@ import { parse } from "yaml";
 
 const workflowPath = new URL("../../.github/workflows/release-gate.yml", import.meta.url);
 const workflowsDirectory = new URL("../../.github/workflows/", import.meta.url);
+const requiredCheckName = "Release Gate Required";
+const githubExpression = /\$\{\{[\s\S]*?\}\}/g;
 function readWorkflow() { return parse(readFileSync(workflowPath, "utf8")); }
 function findRequiredCheckJobs() {
   return readdirSync(workflowsDirectory)
     .filter((file) => /\.ya?ml$/.test(file))
     .flatMap((file) => Object.entries(parse(readFileSync(new URL(file, workflowsDirectory), "utf8")).jobs ?? {})
-      .filter(([, job]) => job.name === "Release Gate Required")
+      .filter(([, job]) => job.name === requiredCheckName)
+      .map(([jobId]) => ({ file, jobId })));
+}
+function isPotentialRequiredCheckCollision(name) {
+  return typeof name === "string" && name.includes("${{")
+    && new RegExp(`^${name.split(githubExpression).map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`).test(requiredCheckName);
+}
+function findPotentialRequiredCheckCollisions() {
+  return readdirSync(workflowsDirectory)
+    .filter((file) => /\.ya?ml$/.test(file))
+    .flatMap((file) => Object.entries(parse(readFileSync(new URL(file, workflowsDirectory), "utf8")).jobs ?? {})
+      .filter(([, job]) => isPotentialRequiredCheckCollision(job.name))
       .map(([jobId]) => ({ file, jobId })));
 }
 
@@ -45,6 +58,7 @@ test("platform matrix runs the approved immutable toolchain and gates", () => {
 test("fixed aggregator has the sole repository-wide required-check identity and fails unless the complete matrix succeeds", () => {
   const job = readWorkflow().jobs["release-gate"];
   assert.deepEqual(findRequiredCheckJobs(), [{ file: "release-gate.yml", jobId: "release-gate" }]);
+  assert.deepEqual(findPotentialRequiredCheckCollisions(), [], "Dynamic job names must not be able to resolve to Release Gate Required");
   assert.deepEqual(Object.keys(job).sort(), ["if", "name", "needs", "runs-on", "steps", "timeout-minutes"]);
   assert.equal(job.name, "Release Gate Required"); assert.equal(job.needs, "platform-gates"); assert.equal(job.if, "${{ always() }}");
   assert.equal(job["runs-on"], "ubuntu-24.04"); assert.equal(job["timeout-minutes"], 5); assert.equal(job.steps.length, 1);
