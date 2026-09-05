@@ -6,7 +6,6 @@ import { parse } from "yaml";
 const workflowPath = new URL("../../.github/workflows/release-gate.yml", import.meta.url);
 const workflowsDirectory = new URL("../../.github/workflows/", import.meta.url);
 const requiredCheckName = "Release Gate Required";
-const githubExpression = /\$\{\{[\s\S]*?\}\}/g;
 function readWorkflow() { return parse(readFileSync(workflowPath, "utf8")); }
 function findRequiredCheckJobs() {
   return readdirSync(workflowsDirectory)
@@ -15,9 +14,33 @@ function findRequiredCheckJobs() {
       .filter(([, job]) => job.name === requiredCheckName)
       .map(([jobId]) => ({ file, jobId })));
 }
+function findExpressionStaticSegments(name) {
+  const staticSegments = [];
+  let staticStart = 0;
+  let expressionStart = name.indexOf("${{", staticStart);
+  if (expressionStart === -1) return null;
+  while (expressionStart !== -1) {
+    staticSegments.push(name.slice(staticStart, expressionStart));
+    let index = expressionStart + 3;
+    let inSingleQuotedString = false;
+    while (index < name.length) {
+      if (name[index] === "'") {
+        if (inSingleQuotedString && name[index + 1] === "'") index += 2;
+        else { inSingleQuotedString = !inSingleQuotedString; index += 1; }
+      } else if (!inSingleQuotedString && name.startsWith("}}", index)) break;
+      else index += 1;
+    }
+    if (index === name.length) return [...staticSegments, ""];
+    staticStart = index + 2;
+    expressionStart = name.indexOf("${{", staticStart);
+  }
+  return [...staticSegments, name.slice(staticStart)];
+}
+function escapeRegularExpression(segment) { return segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function isPotentialRequiredCheckCollision(name) {
-  return typeof name === "string" && name.includes("${{")
-    && new RegExp(`^${name.split(githubExpression).map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`).test(requiredCheckName);
+  const staticSegments = typeof name === "string" && findExpressionStaticSegments(name);
+  if (!staticSegments) return false;
+  return new RegExp(`^${staticSegments.map(escapeRegularExpression).join(".*")}$`).test(requiredCheckName);
 }
 function findPotentialRequiredCheckCollisions() {
   return readdirSync(workflowsDirectory)
