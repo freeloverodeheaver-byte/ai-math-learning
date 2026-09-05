@@ -11,6 +11,10 @@
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "test:native-release": "pnpm --filter @math/db exec tsx test/run-native-release-gates.ts",
+    "test:ci-config": "node --test scripts/ci/release-gate.contract.test.mjs",
     "verify": "pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "yaml": "2.8.1"
   }
 }

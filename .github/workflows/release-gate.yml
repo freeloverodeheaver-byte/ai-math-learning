@@ -1,0 +1,78 @@
+name: Release Gate
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  platform-gates:
+    name: Platform gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        with:
+          version: "10.34.5"
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24.20.0"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frozen dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate CI configuration
+        run: pnpm test:ci-config
+
+      - name: Verify repository
+        run: pnpm verify
+
+      - name: Run foundation gate
+        run: pnpm test:foundation
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Run native PostgreSQL release gate
+        run: pnpm test:native-release
+
+  release-gate:
+    name: Release Gate Required
+    needs: platform-gates
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every platform gate to succeed
+        shell: bash
+        run: |
+          if [ "${{ needs.platform-gates.result }}" != "success" ]; then
+            echo "Platform gate result: ${{ needs.platform-gates.result }}"
+            exit 1
+          fi
