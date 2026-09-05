@@ -7,7 +7,7 @@ The `Release Gate` GitHub Actions workflow qualifies changes; it does not deploy
 The current local repository has no GitHub remote, so these steps require a future GitHub repository administrator:
 
 1. Push the workflow to GitHub and let it complete successfully once on `master`.
-2. In the branch protection rule or repository Ruleset for `master`, require the status check named exactly `Release Gate Required`.
+2. In the branch protection rule or repository Ruleset for `master`, require the status check named exactly `Release Gate Required`. When GitHub offers source selection, select **GitHub Actions** as its expected source. This display name is reserved and must remain unique across every workflow in the repository.
 3. Open a test pull request and verify that a failing or pending gate blocks merging and that a successful gate permits merging.
 
 Do not require the two matrix display names separately. The fixed aggregator is the supported branch-protection interface.

@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { parse } from "yaml";
 
 const workflowPath = new URL("../../.github/workflows/release-gate.yml", import.meta.url);
+const workflowsDirectory = new URL("../../.github/workflows/", import.meta.url);
 function readWorkflow() { return parse(readFileSync(workflowPath, "utf8")); }
+function findRequiredCheckJobs() {
+  return readdirSync(workflowsDirectory)
+    .filter((file) => /\.ya?ml$/.test(file))
+    .flatMap((file) => Object.entries(parse(readFileSync(new URL(file, workflowsDirectory), "utf8")).jobs ?? {})
+      .filter(([, job]) => job.name === "Release Gate Required")
+      .map(([jobId]) => ({ file, jobId })));
+}
 
 test("release gate uses the approved triggers and PR-only cancellation", () => {
   const workflow = readWorkflow();
@@ -34,8 +42,9 @@ test("platform matrix runs the approved immutable toolchain and gates", () => {
   });
 });
 
-test("fixed aggregator fails unless the complete matrix succeeds", () => {
+test("fixed aggregator has the sole repository-wide required-check identity and fails unless the complete matrix succeeds", () => {
   const job = readWorkflow().jobs["release-gate"];
+  assert.deepEqual(findRequiredCheckJobs(), [{ file: "release-gate.yml", jobId: "release-gate" }]);
   assert.deepEqual(Object.keys(job).sort(), ["if", "name", "needs", "runs-on", "steps", "timeout-minutes"]);
   assert.equal(job.name, "Release Gate Required"); assert.equal(job.needs, "platform-gates"); assert.equal(job.if, "${{ always() }}");
   assert.equal(job["runs-on"], "ubuntu-24.04"); assert.equal(job["timeout-minutes"], 5); assert.equal(job.steps.length, 1);
